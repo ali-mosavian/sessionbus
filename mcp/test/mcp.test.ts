@@ -231,6 +231,8 @@ test("an unregistered project is refused with the registered ones, and registeri
   const refused = await m.tool("ListAgents", { project: "newproj" });
   assert.equal(refused.isError, true);
   assert.match(refused.text, /project "newproj" is not registered\. Registered projects: .*\bt\b/);
+  const typo = await m.tool("ListAgents", { project: "newprojj" }); // no key entry covers it either
+  assert.match(typo.text, /project "newprojj" is not registered\. Registered projects: .*\bt\b/);
   assert.match((await m.tool("ListProjects", { project: "newproj" })).text, /^t — \d+ sessions?$/m);
   assert.match((await m.tool("RegisterProject", { project: "newproj" })).text, /Registered project newproj/);
   assert.match((await m.tool("RegisterProject", { project: "newproj" })).text, /already registered/);
@@ -413,7 +415,7 @@ test("errors come back as tool errors, not crashes", opts, async () => {
   await noName.finish();
 
   const wrongKey = new Mcp({ ...session("err-b"), name: "err-a" });
-  assert.match((await wrongKey.tool("ListAgents")).text, /auth failed/);
+  assert.match((await wrongKey.tool("ListAgents")).text, /key may not sign in as "t\/err-a"/);
   await wrongKey.finish();
 });
 

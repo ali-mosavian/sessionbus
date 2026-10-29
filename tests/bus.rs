@@ -732,6 +732,22 @@ async fn projects_of_an_existing_database_are_registered_on_upgrade() {
     assert_eq!(got, ["llrm"], "sessions already in a project locked out by the registry");
 }
 
+#[tokio::test]
+async fn a_valid_key_on_a_mistyped_project_is_told_which_projects_exist() {
+    let rig = Rig::new("typo", &["p/*"]);
+    let (addr, _db, _hub) = rig.start_hub(false, UNLIMITED).await;
+    let key = &rig.keys["p/*"];
+    let mut c = Client::connect(&addr, "p/a", key, false).await.unwrap();
+    c.call(json!({"op": "addproject", "project": "p"})).await.unwrap();
+
+    let e = Client::connect(&addr, "pp/a", key, false).await.err().expect("accepted").to_string();
+    assert!(e.contains("not registered") && e.contains("Registered projects: p"), "a typo got a bare refusal: {e}");
+
+    let stranger = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let e = Client::connect(&addr, "pp/a", &stranger, false).await.err().expect("accepted").to_string();
+    assert!(!e.contains("Registered projects"), "an unknown key learned the project names: {e}");
+}
+
 async fn listen(
     addr: &str,
     name: &str,

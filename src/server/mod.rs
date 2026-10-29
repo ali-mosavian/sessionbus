@@ -185,6 +185,11 @@ async fn handle<S: AsyncRead + AsyncWrite + Unpin>(
         {
             (name, listen)
         }
+        Ok(Req::Hello { name, sig, .. })
+            if auth::valid_name(&name) && auth::signed_by_listed_key(&hub.keys, &name, &nonce, &sig) =>
+        {
+            return put(&mut wr, &err_frame(&ops::refusal(hub, &name).await)).await;
+        }
         _ => return put(&mut wr, &err_frame(&BusErr::new("auth", "auth failed"))).await,
     };
 

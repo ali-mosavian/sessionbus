@@ -48,6 +48,21 @@ async fn gated(
     op.await
 }
 
+/// Why a known key holder cannot sign in as `name`: its project is not
+/// registered (a typo, usually), or the key's entries do not cover it.
+pub async fn refusal(
+    hub: &Hub,
+    name: &str,
+) -> BusErr {
+    match require_project(hub, name).await {
+        Err(e) => e,
+        Ok(()) => BusErr::new(
+            "auth",
+            format!("this key may not sign in as \"{name}\" (its keys-file entries do not cover that name)"),
+        ),
+    }
+}
+
 pub async fn require_project(
     hub: &Hub,
     me: &str,

@@ -68,6 +68,24 @@ pub fn verify(
         .any(|(_, k)| k.verify(NAMESPACE, &msg, &sig).is_ok())
 }
 
+/// Whether some listed key signed in as `name`, even if no entry lets it use
+/// that name: the signer is a known key holder, so it may be told why it was
+/// refused.
+pub fn signed_by_listed_key(
+    keys: &Path,
+    name: &str,
+    nonce: &str,
+    sig_pem: &str,
+) -> bool {
+    let Ok(sig) = SshSig::from_pem(sig_pem) else { return false };
+    let Ok(text) = std::fs::read_to_string(keys) else { return false };
+    let msg = signed_payload(nonce, name);
+    text.lines()
+        .filter_map(|l| l.trim().split_once(char::is_whitespace))
+        .filter_map(|(_, k)| PublicKey::from_openssh(k.trim()).ok())
+        .any(|k| k.verify(NAMESPACE, &msg, &sig).is_ok())
+}
+
 /// A keys file others can write is account takeover: refuse to serve with one.
 #[cfg(unix)]
 pub fn check_keys_perms(keys: &Path) -> Result<(), String> {
