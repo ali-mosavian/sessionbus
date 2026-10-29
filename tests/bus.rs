@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use sessionbus::{
     client::Client,
     db::{self, Db, Meta},
-    server::{Hub, run, serve_conn},
+    server::{Hub, Settings, run, serve_conn},
 };
 use ssh_key::{Algorithm, PrivateKey, rand_core::OsRng};
 use tokio::{
@@ -57,7 +57,8 @@ impl Rig {
         (burst, per_sec): (f64, f64),
     ) -> (String, Db, Arc<Hub>) {
         let db = Db::open(&self.dir.join("bus.db")).unwrap();
-        let hub = Hub::with_limit(db.clone(), self.dir.join("authorized_keys"), burst, per_sec);
+        let hub =
+            Hub::with_settings(db.clone(), self.dir.join("authorized_keys"), Settings { limit: (burst, per_sec) });
         let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap().to_string();
         let h = hub.clone();

@@ -41,28 +41,38 @@ pub struct Hub {
     limits: RateLimit,
 }
 
+/// The relay's tunables.
+#[derive(Clone, Debug)]
+pub struct Settings {
+    /// `(burst, per second)` of normal sends per sender.
+    pub limit: (f64, f64),
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings { limit: DEFAULT_LIMIT }
+    }
+}
+
 impl Hub {
     pub fn new(
         db: Db,
         authorized_keys: PathBuf,
     ) -> Arc<Hub> {
-        let (burst, per_sec) = DEFAULT_LIMIT;
-        Hub::with_limit(db, authorized_keys, burst, per_sec)
+        Hub::with_settings(db, authorized_keys, Settings::default())
     }
 
-    /// `burst` sends at once per sender, refilled at `per_sec`.
-    pub fn with_limit(
+    pub fn with_settings(
         db: Db,
         authorized_keys: PathBuf,
-        burst: f64,
-        per_sec: f64,
+        settings: Settings,
     ) -> Arc<Hub> {
         Arc::new(Hub {
             db,
             keys: authorized_keys,
             listeners: Listeners::default(),
             ledger: Ledger::default(),
-            limits: RateLimit::new((burst, per_sec)),
+            limits: RateLimit::new(settings.limit),
         })
     }
 
