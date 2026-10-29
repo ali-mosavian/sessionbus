@@ -3,3 +3,4 @@ target/
 *.db-*
 authorized_keys
 node_modules/
+dist/

@@ -1,0 +1,103 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches Cargo.toml and mcp/package.json
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          test "$v" = "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          test "$v" = "$(node -p "require('./mcp/package.json').version")"
+
+  build:
+    needs: check-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, target: aarch64-apple-darwin, zig: false }
+          # glibc 2.17 floor: runs on any distro from the last decade
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, zig: true, zigtarget: "x86_64-unknown-linux-gnu.2.17" }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu, zig: true, zigtarget: "aarch64-unknown-linux-gnu.2.17" }
+          # static: runs everywhere, including Alpine
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, zig: true, zigtarget: "x86_64-unknown-linux-musl" }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-musl, zig: true, zigtarget: "aarch64-unknown-linux-musl" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: rustup target add ${{ matrix.target }}
+      - name: Install zig and cargo-zigbuild
+        if: matrix.zig
+        run: |
+          pip3 install --user ziglang cargo-zigbuild
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Build
+        run: |
+          if [ "${{ matrix.zig }}" = true ]; then
+            cargo zigbuild --locked --release --target "${{ matrix.zigtarget }}"
+          else
+            cargo build --locked --release --target "${{ matrix.target }}"
+          fi
+      - name: Smoke test (runnable targets only)
+        if: matrix.target != 'aarch64-unknown-linux-gnu' && matrix.target != 'aarch64-unknown-linux-musl'
+        run: |
+          out=$(target/${{ matrix.target }}/release/sessionbus 2>&1 || true)
+          case "$out" in *usage*) ;; *) echo "unexpected output: $out" >&2; exit 1 ;; esac
+      - name: Package
+        run: |
+          d="sessionbus-${{ matrix.target }}"
+          mkdir "$d"
+          cp "target/${{ matrix.target }}/release/sessionbus" "$d/"
+          tar -czf "$d.tar.gz" "$d"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: sessionbus-${{ matrix.target }}.tar.gz
+
+  mcp:
+    needs: check-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: mcp
+      - run: sh scripts/smoke.sh
+        working-directory: mcp
+      - name: Pack under a stable name
+        working-directory: mcp
+        run: npm pack --silent && mv sessionbus-mcp-*.tgz sessionbus-mcp.tgz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mcp
+          path: mcp/sessionbus-mcp.tgz
+
+  release:
+    needs: [build, mcp]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum -- * > SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes

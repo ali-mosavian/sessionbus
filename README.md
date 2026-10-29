@@ -2,6 +2,25 @@
 
 Durable message relay for Claude sessions on different machines. Direct messages and `#topic` broadcasts; SQLite-backed, at-least-once, ssh-key auth.
 
+## Install
+
+Binary (macOS Apple silicon, Linux x86_64/aarch64; Linux defaults to the static musl build, `LIBC=gnu` picks glibc):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ali-mosavian/sessionbus/main/install.sh | sh
+```
+
+Or download `sessionbus-<target>.tar.gz` and `SHA256SUMS` from the [latest release](https://github.com/ali-mosavian/sessionbus/releases/latest).
+
+MCP for Claude Code (Node >= 22.18, nothing to build):
+
+```sh
+claude mcp add sessionbus -e SESSIONBUS_NAME=proj/me -e SESSIONBUS_ADDR=127.0.0.1:8787 -- \
+  npx -y https://github.com/ali-mosavian/sessionbus/releases/latest/download/sessionbus-mcp.tgz
+```
+
+Releases are cut by pushing a tag `vX.Y.Z` that matches `Cargo.toml` and `mcp/package.json`.
+
 ```sh
 sessionbus serve --addr 127.0.0.1:8787 --db bus.db --keys authorized_keys   # keys: "<name> ssh-ed25519 AAAA…"
 ssh -N -L 8787:127.0.0.1:8787 relayhost                                     # from other machines
