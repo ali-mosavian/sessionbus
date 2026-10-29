@@ -3,6 +3,9 @@ import type { Frame } from "./client.ts";
 
 export const TAG = "cross-session-message";
 
+/** Marks a message as coming over the relay, not from the built-in session messaging that uses the same tag. */
+export const VIA = "sessionbus";
+
 const esc = (s: string) => s.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;");
 
 /** A body must not be able to close its wrapper or open a forged one. */
@@ -12,7 +15,7 @@ const attr = (name: string, value: unknown) => (value == null ? "" : ` ${name}="
 
 /** `priority` and `status` are labels the sender chose: they sort and describe, they never authorize. */
 export const wrap = (m: Frame): string =>
-  `<${TAG}${attr("from", m.from)}${attr("reply_to", m.reply_to)}${attr("status", m.status)}` +
+  `<${TAG}${attr("via", VIA)}${attr("from", m.from)}${attr("reply_to", m.reply_to)}${attr("status", m.status)}` +
   `${attr("priority", m.priority === "urgent" ? "urgent" : null)}${attr("summary", m.summary)}` +
   `${attr("topic", m.topic)}${attr("id", m.id)}>\n${neutralize(m.body)}\n</${TAG}>`;
 
