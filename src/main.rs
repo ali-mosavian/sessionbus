@@ -10,7 +10,7 @@ use sessionbus::{
 };
 use tokio::net::TcpListener;
 
-const USAGE: &str = "usage: sessionbus serve [--addr A] [--db F] [--keys F] [--burst N] [--rate PER_SEC]
+const USAGE: &str = "usage: sessionbus serve [--addr A] [--db F] [--keys F] [--burst N] [--rate PER_SEC] [--unread-ttl-days D]
        sessionbus list | topics | sub <topic> | unsub <topic> | send <to|#topic> <message> [--reply-to ID] [--status done|blocked] [--priority urgent] [--summary TEXT] | status <id>... | inbox [--wait SECS]";
 
 fn die(msg: impl std::fmt::Display) -> ! {
@@ -47,7 +47,13 @@ async fn main() {
         let num =
             |v: Option<String>, default: f64| v.map_or(default, |v| v.parse().unwrap_or_else(|_| die("bad number")));
         let (burst, rate) = (num(opt(&mut args, "--burst"), 100.0), num(opt(&mut args, "--rate"), 20.0));
-        run(l, Hub::with_settings(db, keys.into(), Settings { limit: (burst, rate), ..Settings::default() })).await;
+        let days = num(opt(&mut args, "--unread-ttl-days"), 30.0);
+        let unread_ttl = Duration::from_secs_f64(days * 86400.0);
+        run(
+            l,
+            Hub::with_settings(db, keys.into(), Settings { limit: (burst, rate), unread_ttl, ..Settings::default() }),
+        )
+        .await;
         return;
     }
     if let Err(e) = client_cmd(&cmd, args).await {

@@ -143,7 +143,7 @@ impl Db {
     pub fn open(path: &Path) -> Res<Db> {
         let mut c = Connection::open(path)?;
         c.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON; PRAGMA busy_timeout=5000;
              CREATE TABLE IF NOT EXISTS agents(name TEXT PRIMARY KEY, last_seen INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS subs(topic TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY(topic, name));
              CREATE TABLE IF NOT EXISTS messages(
@@ -364,12 +364,23 @@ pub fn statuses(
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-/// Drops read messages that were read before `before`; returns how many.
-pub fn purge_read(
+/// Drops messages read before `read_before` and unread ones queued before
+/// `unread_before`; returns how many.
+pub fn purge(
     c: &Connection,
-    before: i64,
+    read_before: i64,
+    unread_before: i64,
 ) -> Res<usize> {
-    Ok(c.execute("DELETE FROM messages WHERE read_at IS NOT NULL AND read_at < ?1", [before])?)
+    Ok(c.execute(
+        "DELETE FROM messages WHERE (read_at IS NOT NULL AND read_at < ?1) OR (read_at IS NULL AND at < ?2)",
+        [read_before, unread_before],
+    )?)
+}
+
+/// Folds the write-ahead log back in and truncates it, so deleted content
+/// does not linger there. Best effort: a reader holding the log defers it.
+pub fn compact(c: &Connection) {
+    let _ = c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
 }
 
 /// All of `acks` in one commit.

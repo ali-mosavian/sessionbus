@@ -505,8 +505,8 @@ async fn read_messages_are_kept_empty_then_purged() {
     let body: String =
         db.read(move |c| Ok(c.query_row("SELECT body FROM messages WHERE id=?1", [id], |r| r.get(0))?)).await.unwrap();
     assert_eq!(body, "", "a read message kept its content");
-    assert_eq!(db.run(|c| db::purge_read(c, 0)).await.unwrap(), 0, "purged something read after the cutoff");
-    assert_eq!(db.run(|c| db::purge_read(c, db::now() + 1)).await.unwrap(), 1);
+    assert_eq!(db.run(|c| db::purge(c, 0, 0)).await.unwrap(), 0, "purged something read after the cutoff");
+    assert_eq!(db.run(|c| db::purge(c, db::now() + 1, 0)).await.unwrap(), 1);
     assert!(known().await.unwrap().is_empty());
 }
 
@@ -563,7 +563,7 @@ async fn delivered_reverts_to_queued_when_the_listener_drops() {
 }
 
 fn quick_idle() -> Settings {
-    Settings { limit: UNLIMITED, idle: Duration::from_millis(300) }
+    Settings { limit: UNLIMITED, idle: Duration::from_millis(300), ..Settings::default() }
 }
 
 /// A listener whose peer vanished (cable pulled, machine asleep) held its
@@ -643,4 +643,74 @@ async fn a_second_listener_is_refused_with_name_in_use() {
     drop(first);
     let mut again = listen(&addr, "b", &rig.keys["b"]).await;
     assert_eq!(again.next().await.unwrap().unwrap()["op"], "msg", "the unacked message is replayed");
+}
+
+/// Unread bodies waited forever on the relay's disk.
+#[tokio::test]
+async fn unread_messages_expire_but_young_ones_stay() {
+    let dir = std::env::temp_dir().join(format!("sessionbus-{}-expire", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = Db::open(&dir.join("bus.db")).unwrap();
+    db.run(|c| db::touch(c, "b")).await.unwrap();
+    let mut ids = vec![];
+    for body in ["old unread", "young unread", "young read"] {
+        let sent = db.run(move |c| db::enqueue(c, "a", "b", body, &Meta::default(), &[])).await.unwrap();
+        ids.push(sent[0].1);
+    }
+    let (old, young_unread, young_read) = (ids[0], ids[1], ids[2]);
+    db.run(move |c| {
+        c.execute("UPDATE messages SET at=?1 WHERE id=?2", rusqlite::params![db::now() - 100, old])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    // acks all up to it, so the first two too
+    db.run(move |c| db::ack(c, "b", young_read)).await.unwrap();
+    db.run(move |c| {
+        c.execute("UPDATE messages SET read_at=NULL WHERE id IN (?1, ?2)", rusqlite::params![old, young_unread])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let removed = db.run(|c| db::purge(c, 0, db::now() - 50)).await.unwrap();
+    assert_eq!(removed, 1, "only the old unread row should go");
+    let left = db.read(move |c| db::statuses(c, "a", &[old, young_unread, young_read])).await.unwrap();
+    assert_eq!(left.iter().map(|r| r.0).collect::<Vec<_>>(), [young_unread, young_read]);
+}
+
+/// Deleted bodies stayed readable in freed pages of the database file.
+#[tokio::test]
+async fn deleted_content_is_zeroed() {
+    let dir = std::env::temp_dir().join(format!("sessionbus-{}-secure", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = Db::open(&dir.join("bus.db")).unwrap();
+    let on: i64 = db.run(|c| Ok(c.query_row("PRAGMA secure_delete", [], |r| r.get(0))?)).await.unwrap();
+    assert_ne!(on, 0, "secure_delete is off");
+}
+
+/// The purge must run in the relay itself, with the configured ttl.
+#[tokio::test]
+async fn the_running_relay_expires_unread_messages() {
+    let rig = Rig::new("expiry", &["a", "b"]);
+    let settings = Settings {
+        limit: UNLIMITED,
+        unread_ttl: Duration::from_secs(1),
+        purge_every: Duration::from_millis(100),
+        ..Settings::default()
+    };
+    let (addr, _db, _hub) = rig.start_hub_with(true, settings).await;
+    drop(rig.conn(&addr, "b", false).await);
+    let mut a = rig.conn(&addr, "a", false).await;
+    let id = send(&mut a, "b", "never read").await["ids"][0].as_i64().unwrap();
+    assert_eq!(state(&mut a, id).await, "queued");
+    for _ in 0..80 {
+        if state(&mut a, id).await == "unknown" {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("an unread message outlived its ttl");
 }

@@ -27,14 +27,12 @@ use self::{
 use crate::db::{self, BusErr, Db, Msg};
 
 const BATCH: i64 = 500;
+const DAY: u64 = 24 * 3600;
 const DEFAULT_IDLE: Duration = Duration::from_secs(45);
 /// For connections that may stay silent (not listening).
 const NEVER: Duration = Duration::from_secs(365 * 24 * 3600);
 /// How long an ack may wait in memory when no send is committing.
 const ACK_INTERVAL: Duration = Duration::from_millis(100);
-/// Read messages are kept (without content) so senders can check on them.
-const READ_TTL_SECS: i64 = 7 * 24 * 3600;
-const PURGE_EVERY: u32 = 6000; // ticks: ten minutes
 
 pub struct Hub {
     db: Db,
@@ -42,7 +40,7 @@ pub struct Hub {
     listeners: Listeners,
     ledger: Ledger,
     limits: RateLimit,
-    idle: Duration,
+    settings: Settings,
 }
 
 /// The relay's tunables.
@@ -53,11 +51,24 @@ pub struct Settings {
     /// A listening connection that sends nothing for this long is dropped, so
     /// a vanished peer does not hold its name.
     pub idle: Duration,
+    /// Read messages are kept (without content) for this long, so senders can
+    /// still ask what became of them.
+    pub read_ttl: Duration,
+    /// Unread messages, content and all, are dropped after this long.
+    pub unread_ttl: Duration,
+    /// How often expired messages are purged.
+    pub purge_every: Duration,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { limit: DEFAULT_LIMIT, idle: DEFAULT_IDLE }
+        Settings {
+            limit: DEFAULT_LIMIT,
+            idle: DEFAULT_IDLE,
+            read_ttl: Duration::from_secs(7 * DAY),
+            unread_ttl: Duration::from_secs(30 * DAY),
+            purge_every: Duration::from_secs(600),
+        }
     }
 }
 
@@ -80,8 +91,23 @@ impl Hub {
             listeners: Listeners::default(),
             ledger: Ledger::default(),
             limits: RateLimit::new(settings.limit),
-            idle: settings.idle,
+            settings,
         })
+    }
+
+    /// Drops messages past their ttl, content included.
+    async fn purge(&self) {
+        let now = db::now();
+        let (read_before, unread_before) =
+            (now - self.settings.read_ttl.as_secs() as i64, now - self.settings.unread_ttl.as_secs() as i64);
+        let _ = self
+            .db
+            .run(move |c| {
+                db::purge(c, read_before, unread_before)?;
+                db::compact(c);
+                Ok(())
+            })
+            .await;
     }
 
     /// Commits the acks received so far.
@@ -97,18 +123,19 @@ impl Hub {
     }
 }
 
-/// Applies pending acks every `ACK_INTERVAL`, until the hub is dropped.
+/// Applies pending acks every `ACK_INTERVAL` and purges expired messages every
+/// `purge_every`, until the hub is dropped.
 async fn flush_acks(hub: Weak<Hub>) {
     let mut tick = interval(ACK_INTERVAL);
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let mut ticks = 0u32;
+    let mut last_purge = Instant::now();
     loop {
         tick.tick().await;
         let Some(h) = hub.upgrade() else { return };
         h.apply_acks().await;
-        ticks += 1;
-        if ticks % PURGE_EVERY == 0 {
-            let _ = h.db.run(|c| db::purge_read(c, db::now() - READ_TTL_SECS)).await;
+        if last_purge.elapsed() >= h.settings.purge_every {
+            last_purge = Instant::now();
+            h.purge().await;
         }
     }
 }
@@ -207,7 +234,7 @@ async fn session<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     }
     // A silent listener is dropped; any line, a ping included, resets the
     // clock.
-    let idle = if listen { hub.idle } else { NEVER };
+    let idle = if listen { hub.settings.idle } else { NEVER };
     let mut deadline = Instant::now() + idle;
     loop {
         tokio::select! {
