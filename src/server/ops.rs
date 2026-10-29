@@ -22,6 +22,7 @@ pub async fn dispatch(
         Req::Hello { .. } => Err(BusErr::bad_request("already authenticated")),
         Req::List => list(hub).await,
         Req::Topics => topics(hub).await,
+        Req::Ping => Ok(json!({"op": "pong"})),
         Req::Sub { topic } => sub(hub, me, &topic, true).await,
         Req::Unsub { topic } => sub(hub, me, &topic, false).await,
         Req::Send(r) => send(hub, me, r).await,

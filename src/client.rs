@@ -17,6 +17,7 @@ use crate::server::{NAMESPACE, signed_payload};
 pub struct Client {
     rd: Lines<BufReader<ReadHalf<TcpStream>>>,
     wr: WriteHalf<TcpStream>,
+    ping_every: Duration,
 }
 
 pub fn load_key(path: &Path) -> Result<PrivateKey, String> {
@@ -58,7 +59,20 @@ impl Config {
     }
 }
 
+/// How often a waiting listener tells the relay it is alive. The relay drops a
+/// listener silent for 45 s.
+const PING_EVERY: Duration = Duration::from_secs(15);
+
 impl Client {
+    /// Overrides the keep-alive interval.
+    pub fn with_ping_every(
+        mut self,
+        every: Duration,
+    ) -> Self {
+        self.ping_every = every;
+        self
+    }
+
     /// Connects and authenticates as `name`. `listen` clients receive pushed
     /// messages.
     pub async fn connect(
@@ -69,7 +83,7 @@ impl Client {
     ) -> Result<Client, String> {
         let s = TcpStream::connect(addr).await.map_err(|e| format!("{addr}: {e}"))?;
         let (rd, wr) = tokio::io::split(s);
-        let mut c = Client { rd: BufReader::new(rd).lines(), wr };
+        let mut c = Client { rd: BufReader::new(rd).lines(), wr, ping_every: PING_EVERY };
         let ch = c.next().await?.ok_or("closed before challenge")?;
         let nonce = ch["nonce"].as_str().ok_or("bad challenge")?;
         let sig = key
@@ -149,11 +163,17 @@ impl Client {
     ) -> Result<Vec<Value>, String> {
         let deadline = Instant::now() + wait;
         let (mut out, mut ready) = (Vec::new(), false);
+        let mut next_ping = Instant::now() + self.ping_every;
         loop {
             let frame = if ready {
-                match timeout_at(deadline, self.next()).await {
+                match timeout_at(deadline.min(next_ping), self.next()).await {
                     Ok(f) => f?,
-                    Err(_) => return Ok(out),
+                    Err(_) if Instant::now() >= deadline => return Ok(out),
+                    Err(_) => {
+                        self.send(&json!({"op": "ping"})).await?;
+                        next_ping = Instant::now() + self.ping_every;
+                        continue;
+                    }
                 }
             } else {
                 self.next().await?

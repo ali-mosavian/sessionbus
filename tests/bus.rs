@@ -56,9 +56,16 @@ impl Rig {
         timer: bool,
         (burst, per_sec): (f64, f64),
     ) -> (String, Db, Arc<Hub>) {
+        self.start_hub_with(timer, Settings { limit: (burst, per_sec), ..Settings::default() }).await
+    }
+
+    async fn start_hub_with(
+        &self,
+        timer: bool,
+        settings: Settings,
+    ) -> (String, Db, Arc<Hub>) {
         let db = Db::open(&self.dir.join("bus.db")).unwrap();
-        let hub =
-            Hub::with_settings(db.clone(), self.dir.join("authorized_keys"), Settings { limit: (burst, per_sec) });
+        let hub = Hub::with_settings(db.clone(), self.dir.join("authorized_keys"), settings);
         let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap().to_string();
         let h = hub.clone();
@@ -553,4 +560,49 @@ async fn delivered_reverts_to_queued_when_the_listener_drops() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     panic!("still {} after the listener dropped", state(&mut a, id).await);
+}
+
+fn quick_idle() -> Settings {
+    Settings { limit: UNLIMITED, idle: Duration::from_millis(300) }
+}
+
+/// A listener whose peer vanished (cable pulled, machine asleep) held its
+/// connection, and so its name, until TCP gave up, which can take hours.
+#[tokio::test]
+async fn a_silent_listener_is_dropped() {
+    let rig = Rig::new("silent", &["b"]);
+    let (addr, _db, _hub) = rig.start_hub_with(false, quick_idle()).await;
+    let mut b = Client::connect(&addr, "b", &rig.keys["b"], true).await.unwrap();
+    assert_eq!(b.next().await.unwrap().unwrap()["op"], "ready");
+    let closed = timeout(Duration::from_secs(3), b.next()).await.expect("still open after 3s");
+    assert!(closed.unwrap().is_none(), "expected the relay to close the connection");
+}
+
+#[tokio::test]
+async fn a_pinging_listener_is_kept() {
+    let rig = Rig::new("pinging", &["a", "b"]);
+    let (addr, _db, _hub) = rig.start_hub_with(false, quick_idle()).await;
+    drop(rig.conn(&addr, "b", false).await);
+    let mut a = rig.conn(&addr, "a", false).await;
+    let mut b = Client::connect(&addr, "b", &rig.keys["b"], true).await.unwrap();
+    assert_eq!(b.next().await.unwrap().unwrap()["op"], "ready");
+    for _ in 0..20 {
+        b.send(&json!({"op": "ping"})).await.unwrap();
+        assert_eq!(b.next().await.unwrap().expect("dropped while pinging")["op"], "pong");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    send(&mut a, "b", "still there").await;
+    assert_eq!(msg(&mut b).await["body"], "still there");
+}
+
+/// `sessionbus inbox --wait` sat silent past the relay's idle limit and was
+/// dropped. The client must ping on its own while it waits.
+#[tokio::test]
+async fn a_waiting_inbox_pings_by_itself() {
+    let rig = Rig::new("waiting", &["b"]);
+    let (addr, _db, _hub) = rig.start_hub_with(false, quick_idle()).await;
+    let mut b =
+        Client::connect(&addr, "b", &rig.keys["b"], true).await.unwrap().with_ping_every(Duration::from_millis(80));
+    let got = b.inbox(Duration::from_millis(1200)).await;
+    assert_eq!(got.expect("connection was dropped while waiting").len(), 0);
 }

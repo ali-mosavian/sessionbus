@@ -26,6 +26,8 @@ pub enum Req {
         topic: String,
     },
     Topics,
+    /// Keeps a listening connection from being dropped as silent.
+    Ping,
     Ack {
         id: i64,
     },

@@ -39,7 +39,7 @@ async fn main() {
     let hub = Hub::with_settings(
         Db::open(&dir.join("bus.db")).unwrap(),
         dir.join("authorized_keys"),
-        Settings { limit: (1e9, 1e9) },
+        Settings { limit: (1e9, 1e9), ..Settings::default() },
     );
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap().to_string();

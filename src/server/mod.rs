@@ -16,7 +16,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, BufReader, WriteHalf},
     net::TcpListener,
     sync::Notify,
-    time::{MissedTickBehavior, interval, timeout},
+    time::{Instant, MissedTickBehavior, interval, timeout, timeout_at},
 };
 
 pub use self::auth::{NAMESPACE, signed_payload};
@@ -27,6 +27,9 @@ use self::{
 use crate::db::{self, BusErr, Db, Msg};
 
 const BATCH: i64 = 500;
+const DEFAULT_IDLE: Duration = Duration::from_secs(45);
+/// For connections that may stay silent (not listening).
+const NEVER: Duration = Duration::from_secs(365 * 24 * 3600);
 /// How long an ack may wait in memory when no send is committing.
 const ACK_INTERVAL: Duration = Duration::from_millis(100);
 /// Read messages are kept (without content) so senders can check on them.
@@ -39,6 +42,7 @@ pub struct Hub {
     listeners: Listeners,
     ledger: Ledger,
     limits: RateLimit,
+    idle: Duration,
 }
 
 /// The relay's tunables.
@@ -46,11 +50,14 @@ pub struct Hub {
 pub struct Settings {
     /// `(burst, per second)` of normal sends per sender.
     pub limit: (f64, f64),
+    /// A listening connection that sends nothing for this long is dropped, so
+    /// a vanished peer does not hold its name.
+    pub idle: Duration,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { limit: DEFAULT_LIMIT }
+        Settings { limit: DEFAULT_LIMIT, idle: DEFAULT_IDLE }
     }
 }
 
@@ -73,6 +80,7 @@ impl Hub {
             listeners: Listeners::default(),
             ledger: Ledger::default(),
             limits: RateLimit::new(settings.limit),
+            idle: settings.idle,
         })
     }
 
@@ -187,9 +195,15 @@ async fn session<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         cursor = flush(hub, name, cursor, wr).await?;
         put(wr, &json!({"op": "ready"})).await?;
     }
+    // A silent listener is dropped; any line, a ping included, resets the
+    // clock.
+    let idle = if listen { hub.idle } else { NEVER };
+    let mut deadline = Instant::now() + idle;
     loop {
         tokio::select! {
-            line = lines.next_line() => {
+            line = timeout_at(deadline, lines.next_line()) => {
+                let Ok(line) = line else { return Ok(()) };
+                deadline = Instant::now() + idle;
                 let Some(line) = line? else { return Ok(()) };
                 let reply = match serde_json::from_str::<Req>(&line) {
                     Ok(req) => ops::dispatch(hub, name, req).await,
