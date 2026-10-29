@@ -5,7 +5,8 @@ import { BusError, Conn, type Config, type Frame } from "./client.ts";
 import { TAG, ago, plural, wrap } from "./format.ts";
 
 export type Args = Record<string, any>;
-export type ToolResult = { text: string; after?: () => Promise<void> };
+/** `after` runs once the reply was written or failed; `delivered` says which. */
+export type ToolResult = { text: string; after?: (delivered: boolean) => Promise<void> };
 export interface Tool {
   description: string;
   input: object;
@@ -29,6 +30,18 @@ async function once<T>(cfg: Config, f: (c: Conn) => Promise<T>): Promise<T> {
     return await f(c);
   } finally {
     c.close();
+  }
+}
+
+/** The relay notices a closed listener a moment later; wait for the name to free up. */
+async function openListener(cfg: Config): Promise<Conn> {
+  for (let i = 0; ; i++) {
+    try {
+      return await Conn.open(cfg, true);
+    } catch (e) {
+      if (!(e instanceof BusError && e.code === "name_in_use") || i >= 60) throw e;
+      await new Promise((r) => setTimeout(r, 50));
+    }
   }
 }
 
@@ -153,7 +166,7 @@ export const TOOLS: Record<string, Tool> = {
       "are not pushed: call this when you expect a reply or were told one is waiting.",
     input: schema({}),
     run: async (cfg) => {
-      const c = await Conn.open(cfg, true);
+      const c = await openListener(cfg);
       let msgs: Frame[];
       try {
         msgs = await c.inbox();
@@ -167,7 +180,7 @@ export const TOOLS: Record<string, Tool> = {
       }
       const last = Math.max(...msgs.map((m) => m.id as number));
       const ordered = [...msgs.filter((m) => m.priority === "urgent"), ...msgs.filter((m) => m.priority !== "urgent")];
-      return { text: ordered.map(wrap).join("\n\n"), after: () => c.ackSync(last).finally(() => c.close()) };
+      return { text: ordered.map(wrap).join("\n\n"), after: (delivered) => (delivered ? c.ackSync(last) : Promise.resolve()).finally(() => c.close()) };
     },
   },
 

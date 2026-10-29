@@ -16,7 +16,7 @@ const INSTRUCTIONS =
 const toolList = () =>
   Object.entries(TOOLS).map(([name, t]) => ({ name, description: t.description, inputSchema: t.input }));
 
-type Reply = { body: Record<string, unknown>; after?: () => Promise<void> };
+type Reply = { body: Record<string, unknown>; after?: (delivered: boolean) => Promise<void> };
 
 async function handle(cfg: Config, req: any): Promise<Reply> {
   const params = req.params ?? {};
@@ -65,7 +65,7 @@ async function handleLine(cfg: Config, out: Writable, line: string): Promise<voi
   }
   const delivered = await write(out, JSON.stringify({ jsonrpc: "2.0", id, ...reply.body }) + "\n");
   // Ack only what Claude was actually handed; otherwise the messages stay queued.
-  if (delivered) await reply.after?.().catch(() => {});
+  await reply.after?.(delivered).catch(() => {});
 }
 
 /** Serves until `input` ends, then waits for in-flight requests and their acks. */

@@ -162,7 +162,17 @@ async fn handle<S: AsyncRead + AsyncWrite + Unpin>(
     };
 
     let wake = Arc::new(Notify::new());
-    let registration = listen.then(|| hub.listeners.register(&name, wake.clone()));
+    let registration = if listen {
+        match hub.listeners.register(&name, wake.clone()) {
+            Ok(r) => Some(r),
+            Err(_) => {
+                let taken = BusErr::new("name_in_use", "a listener for this name is already connected");
+                return put(&mut wr, &err_frame(&taken)).await;
+            }
+        }
+    } else {
+        None
+    };
     let res = session(hub, &name, listen, br, &mut wr, &wake).await;
     drop(registration);
     if listen && !hub.listeners.online(&name) {

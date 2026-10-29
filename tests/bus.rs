@@ -137,11 +137,11 @@ async fn unacked_message_is_redelivered_after_reconnect() {
     send(&mut a, "b", "hello").await;
 
     drop(rig.conn(&addr, "b", false).await);
-    let mut b1 = Client::connect(&addr, "b", &rig.keys["b"], true).await.unwrap();
+    let mut b1 = listen(&addr, "b", &rig.keys["b"]).await;
     let first = msg(&mut b1).await;
     drop(b1); // never acked
 
-    let mut b2 = Client::connect(&addr, "b", &rig.keys["b"], true).await.unwrap();
+    let mut b2 = listen(&addr, "b", &rig.keys["b"]).await;
     let again = msg(&mut b2).await;
     assert_eq!(first["id"], again["id"]);
     assert_eq!(again["body"], "hello");
@@ -155,7 +155,7 @@ async fn acked_message_is_not_redelivered() {
     let mut a = rig.conn(&addr, "a", false).await;
     send(&mut a, "b", "once").await;
 
-    let mut b = Client::connect(&addr, "b", &rig.keys["b"], true).await.unwrap();
+    let mut b = listen(&addr, "b", &rig.keys["b"]).await;
     let m = msg(&mut b).await;
     b.ack(m["id"].as_i64().unwrap()).await.unwrap();
     // The ack is fire-and-forget; a round trip on another connection orders it
@@ -164,7 +164,7 @@ async fn acked_message_is_not_redelivered() {
     b_ctl.call(json!({"op": "list"})).await.unwrap();
     drop(b);
 
-    let mut b2 = Client::connect(&addr, "b", &rig.keys["b"], true).await.unwrap();
+    let mut b2 = listen(&addr, "b", &rig.keys["b"]).await;
     assert_eq!(b2.next().await.unwrap().unwrap()["op"], "ready");
 }
 
@@ -219,7 +219,7 @@ async fn queued_messages_survive_a_relay_restart() {
     s.abort();
 
     let (addr2, _s2) = rig.start().await;
-    let mut b = Client::connect(&addr2, "b", &rig.keys["b"], true).await.unwrap();
+    let mut b = listen(&addr2, "b", &rig.keys["b"]).await;
     assert_eq!(msg(&mut b).await["body"], "persist me");
 }
 
@@ -245,7 +245,7 @@ async fn deliveries_do_not_cost_a_commit_each() {
     }
 
     let before = db.commits();
-    let mut b = Client::connect(&addr, "b", &rig.keys["b"], true).await.unwrap();
+    let mut b = listen(&addr, "b", &rig.keys["b"]).await;
     let mut last = 0;
     for _ in 0..N {
         last = msg(&mut b).await["id"].as_i64().unwrap();
@@ -258,7 +258,7 @@ async fn deliveries_do_not_cost_a_commit_each() {
     assert_eq!(queued(&db, "b").await, 0);
     drop(b);
 
-    let mut b2 = Client::connect(&addr, "b", &rig.keys["b"], true).await.unwrap();
+    let mut b2 = listen(&addr, "b", &rig.keys["b"]).await;
     assert_eq!(b2.next().await.unwrap().unwrap()["op"], "ready", "acked messages were redelivered");
 }
 
@@ -272,7 +272,7 @@ async fn acks_are_applied_without_any_further_send() {
     let mut a = rig.conn(&addr, "a", false).await;
     send(&mut a, "b", "x").await;
 
-    let mut b = Client::connect(&addr, "b", &rig.keys["b"], true).await.unwrap();
+    let mut b = listen(&addr, "b", &rig.keys["b"]).await;
     let id = msg(&mut b).await["id"].as_i64().unwrap();
     b.ack_sync(id).await.unwrap();
     for _ in 0..60 {
@@ -293,7 +293,7 @@ async fn failed_send_keeps_pending_acks() {
     drop(rig.conn(&addr, "b", false).await);
     let mut a = rig.conn(&addr, "a", false).await;
     send(&mut a, "b", "x").await;
-    let mut b = Client::connect(&addr, "b", &rig.keys["b"], true).await.unwrap();
+    let mut b = listen(&addr, "b", &rig.keys["b"]).await;
     let id = msg(&mut b).await["id"].as_i64().unwrap();
     b.ack_sync(id).await.unwrap();
 
@@ -312,7 +312,7 @@ async fn successful_send_applies_pending_acks() {
     drop(rig.conn(&addr, "c", false).await);
     let mut a = rig.conn(&addr, "a", false).await;
     send(&mut a, "b", "x").await;
-    let mut b = Client::connect(&addr, "b", &rig.keys["b"], true).await.unwrap();
+    let mut b = listen(&addr, "b", &rig.keys["b"]).await;
     let id = msg(&mut b).await["id"].as_i64().unwrap();
     b.ack_sync(id).await.unwrap();
 
@@ -341,7 +341,7 @@ async fn sender_can_follow_a_message_from_queued_to_read() {
     assert_eq!((r["recipients"][0]["name"].as_str(), r["recipients"][0]["online"].as_bool()), (Some("b"), Some(false)));
     assert_eq!(state(&mut a, id).await, "queued");
 
-    let mut b = Client::connect(&addr, "b", &rig.keys["b"], true).await.unwrap();
+    let mut b = listen(&addr, "b", &rig.keys["b"]).await;
     assert_eq!(msg(&mut b).await["id"], id);
     assert_eq!(state(&mut a, id).await, "delivered");
     assert_eq!(send(&mut a, "b", "y").await["recipients"][0]["online"], true);
@@ -549,7 +549,7 @@ async fn delivered_reverts_to_queued_when_the_listener_drops() {
     let mut a = rig.conn(&addr, "a", false).await;
     let id = send(&mut a, "b", "x").await["ids"][0].as_i64().unwrap();
 
-    let mut b = Client::connect(&addr, "b", &rig.keys["b"], true).await.unwrap();
+    let mut b = listen(&addr, "b", &rig.keys["b"]).await;
     assert_eq!(msg(&mut b).await["id"], id);
     assert_eq!(state(&mut a, id).await, "delivered");
     drop(b);
@@ -572,7 +572,7 @@ fn quick_idle() -> Settings {
 async fn a_silent_listener_is_dropped() {
     let rig = Rig::new("silent", &["b"]);
     let (addr, _db, _hub) = rig.start_hub_with(false, quick_idle()).await;
-    let mut b = Client::connect(&addr, "b", &rig.keys["b"], true).await.unwrap();
+    let mut b = listen(&addr, "b", &rig.keys["b"]).await;
     assert_eq!(b.next().await.unwrap().unwrap()["op"], "ready");
     let closed = timeout(Duration::from_secs(3), b.next()).await.expect("still open after 3s");
     assert!(closed.unwrap().is_none(), "expected the relay to close the connection");
@@ -584,7 +584,7 @@ async fn a_pinging_listener_is_kept() {
     let (addr, _db, _hub) = rig.start_hub_with(false, quick_idle()).await;
     drop(rig.conn(&addr, "b", false).await);
     let mut a = rig.conn(&addr, "a", false).await;
-    let mut b = Client::connect(&addr, "b", &rig.keys["b"], true).await.unwrap();
+    let mut b = listen(&addr, "b", &rig.keys["b"]).await;
     assert_eq!(b.next().await.unwrap().unwrap()["op"], "ready");
     for _ in 0..20 {
         b.send(&json!({"op": "ping"})).await.unwrap();
@@ -601,8 +601,46 @@ async fn a_pinging_listener_is_kept() {
 async fn a_waiting_inbox_pings_by_itself() {
     let rig = Rig::new("waiting", &["b"]);
     let (addr, _db, _hub) = rig.start_hub_with(false, quick_idle()).await;
-    let mut b =
-        Client::connect(&addr, "b", &rig.keys["b"], true).await.unwrap().with_ping_every(Duration::from_millis(80));
+    let mut b = listen(&addr, "b", &rig.keys["b"]).await.with_ping_every(Duration::from_millis(80));
     let got = b.inbox(Duration::from_millis(1200)).await;
     assert_eq!(got.expect("connection was dropped while waiting").len(), 0);
+}
+
+/// Connects as a listener, retrying while the relay still holds the name for a
+/// connection that has just closed.
+async fn listen(
+    addr: &str,
+    name: &str,
+    key: &PrivateKey,
+) -> Client {
+    for _ in 0..60 {
+        match Client::connect(addr, name, key, true).await {
+            Ok(c) => return c,
+            Err(e) if e.contains("already connected") => tokio::time::sleep(Duration::from_millis(50)).await,
+            Err(e) => panic!("{e}"),
+        }
+    }
+    panic!("the name stayed taken");
+}
+
+/// A second session could attach as the same name and read its messages,
+/// or split them with the first.
+#[tokio::test]
+async fn a_second_listener_is_refused_with_name_in_use() {
+    let rig = Rig::new("inuse", &["a", "b"]);
+    let (addr, _db, _hub) = rig.start_hub(false, UNLIMITED).await;
+    let mut first = listen(&addr, "b", &rig.keys["b"]).await;
+    assert_eq!(first.next().await.unwrap().unwrap()["op"], "ready");
+
+    let refused = Client::connect(&addr, "b", &rig.keys["b"], true).await.err().expect("second listener accepted");
+    assert!(refused.contains("already connected"), "{refused}");
+
+    let mut a = rig.conn(&addr, "a", false).await;
+    send(&mut a, "b", "for the first").await;
+    assert_eq!(msg(&mut first).await["body"], "for the first");
+    assert!(Client::connect(&addr, "b", &rig.keys["b"], false).await.is_ok(), "plain connections are not listeners");
+
+    drop(first);
+    let mut again = listen(&addr, "b", &rig.keys["b"]).await;
+    assert_eq!(again.next().await.unwrap().unwrap()["op"], "msg", "the unacked message is replayed");
 }

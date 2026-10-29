@@ -1,6 +1,6 @@
 //! What the relay remembers beside the database, one lock per concern.
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, hash_map::Entry},
     sync::{Arc, Mutex},
     time::Instant,
 };
@@ -15,9 +15,14 @@ pub const DEFAULT_LIMIT: (f64, f64) = (100.0, 20.0);
 /// looping sender cannot flood with them.
 pub const URGENT_LIMIT: (f64, f64) = (10.0, 1.0);
 
-/// The connections listening as each name.
+/// The connection listening as each name: at most one, so a second session
+/// cannot attach to a live name and read its messages.
 #[derive(Default)]
-pub struct Listeners(Mutex<HashMap<String, Vec<Arc<Notify>>>>);
+pub struct Listeners(Mutex<HashMap<String, Arc<Notify>>>);
+
+/// The name already has a live listener.
+#[derive(Debug)]
+pub struct InUse;
 
 impl Listeners {
     /// `wake` is notified by `notify(name)` until the guard drops.
@@ -25,9 +30,14 @@ impl Listeners {
         &self,
         name: &str,
         wake: Arc<Notify>,
-    ) -> Registration<'_> {
-        lock(&self.0).entry(name.to_string()).or_default().push(wake.clone());
-        Registration { owner: self, name: name.to_string(), wake }
+    ) -> Result<Registration<'_>, InUse> {
+        match lock(&self.0).entry(name.to_string()) {
+            Entry::Occupied(_) => Err(InUse),
+            Entry::Vacant(slot) => {
+                slot.insert(wake.clone());
+                Ok(Registration { owner: self, name: name.to_string(), wake })
+            }
+        }
     }
 
     /// Wakeups coalesce: any number before the listener runs cost it one pass.
@@ -35,14 +45,16 @@ impl Listeners {
         &self,
         name: &str,
     ) {
-        lock(&self.0).get(name).into_iter().flatten().for_each(|w| w.notify_one());
+        if let Some(w) = lock(&self.0).get(name) {
+            w.notify_one();
+        }
     }
 
     pub fn online(
         &self,
         name: &str,
     ) -> bool {
-        lock(&self.0).get(name).is_some_and(|v| !v.is_empty())
+        lock(&self.0).contains_key(name)
     }
 }
 
@@ -55,9 +67,7 @@ pub struct Registration<'a> {
 impl Drop for Registration<'_> {
     fn drop(&mut self) {
         let mut all = lock(&self.owner.0);
-        let Some(mine) = all.get_mut(&self.name) else { return };
-        mine.retain(|w| !Arc::ptr_eq(w, &self.wake));
-        if mine.is_empty() {
+        if all.get(&self.name).is_some_and(|w| Arc::ptr_eq(w, &self.wake)) {
             all.remove(&self.name);
         }
     }
@@ -208,7 +218,7 @@ mod tests {
     async fn a_burst_of_notifications_wakes_the_listener_once() {
         let listeners = Listeners::default();
         let wake = Arc::new(Notify::new());
-        let _reg = listeners.register("b", wake.clone());
+        let _reg = listeners.register("b", wake.clone()).unwrap();
         for _ in 0..100 {
             listeners.notify("b");
         }
@@ -218,14 +228,14 @@ mod tests {
     }
 
     #[test]
-    fn dropping_the_registration_takes_the_name_offline() {
+    fn a_name_has_one_listener_until_it_drops() {
         let listeners = Listeners::default();
-        let (one, two) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
-        let (a, b) = (listeners.register("x", one), listeners.register("x", two));
-        drop(a);
+        let first = listeners.register("x", Arc::new(Notify::new())).unwrap();
+        assert!(listeners.register("x", Arc::new(Notify::new())).is_err());
         assert!(listeners.online("x"));
-        drop(b);
+        drop(first);
         assert!(!listeners.online("x"));
+        assert!(listeners.register("x", Arc::new(Notify::new())).is_ok());
     }
 
     /// `ack i64::MAX` made `upto + 1` overflow and panic.
