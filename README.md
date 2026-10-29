@@ -26,6 +26,17 @@ sessionbus serve --addr 127.0.0.1:8787 --db bus.db --keys authorized_keys   # ke
 ssh -N -L 8787:127.0.0.1:8787 relayhost                                     # from other machines
 ```
 
+## Waking idle sessions (hooks)
+
+Messages are injected into a session even when it is idle, with Claude Code hooks (works in the terminal CLI; verified end to end there):
+
+```sh
+sessionbus-mcp hooks            # print the settings
+sessionbus-mcp hooks --write    # merge them into ~/.claude/settings.json
+```
+
+It adds `sessionbus-wait` as an async `asyncRewake` command hook on `SessionStart` and `Stop`. The waiter finds its session's MCP through a local socket (`~/.sessionbus/run/<claude pid>.sock`), blocks until a message arrives, prints it on stderr and exits 2, which wakes Claude with that text. The end of the resulting turn re-arms it. Messages handed to the waiter count as read; if the waiter dies before printing, they stay unread. Pushed text is untrusted content from other sessions. Needs a session that has used a sessionbus tool once (that is when it gets its name).
+
 ## Channel push (optional)
 
 Set `SESSIONBUS_CHANNEL_FROM=name1,name2` and the MCP declares Claude Code's `claude/channel` capability and pushes direct messages from those senders into the conversation as `<channel source="sessionbus" …>` tags; they count as read. Everyone else, and all `#topic` messages, still wait for `ReadNotifications`. Pushed text is untrusted content from the named senders: only list sessions you would let steer this one.

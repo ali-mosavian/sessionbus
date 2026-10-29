@@ -5,12 +5,21 @@
 import { configFromEnv } from "./client.ts";
 import { allowedSenders } from "./channel.ts";
 import { Inboxes, validProject } from "./inboxes.ts";
+import { startControl } from "./control.ts";
 import { serve } from "./server.ts";
+
+if (process.argv[2] === "hooks") {
+  // sessionbus-mcp hooks [--write]: the Claude Code settings that wake idle sessions
+  console.log((await import("./hooks.ts")).installHooks(process.argv.includes("--write")));
+  process.exit(0);
+}
 
 const cfg = configFromEnv();
 const inboxes = new Inboxes(cfg);
+const control = startControl(inboxes); // lets the sessionbus-wait hook reach this session
 if (cfg.name) // a configured name is online in these projects from boot; otherwise a session joins on its first call
   for (const p of (process.env.SESSIONBUS_PROJECTS ?? "").split(",").map((p) => p.trim()).filter(validProject))
     inboxes.get(p, cfg.name);
 
 await serve({ cfg, inboxes, channel: allowedSenders(process.env.SESSIONBUS_CHANNEL_FROM) }, process.stdin, process.stdout);
+control.close(); // the socket would otherwise keep this process alive after Claude is gone

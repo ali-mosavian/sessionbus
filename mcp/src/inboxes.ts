@@ -1,6 +1,6 @@
 // One inbox per project a session talks in, opened on first use: the relay
 // name there is `project/name`.
-import type { Config } from "./client.ts";
+import type { Config, Frame } from "./client.ts";
 import { relayInbox, type Inbox } from "./inbox.ts";
 
 export class Inboxes {
@@ -10,6 +10,7 @@ export class Inboxes {
   /** The name this session last used: later calls may leave `as` out. */
   private current?: string;
   private watcher?: (inbox: Inbox, project: string) => void;
+  private taps: Array<(inbox: Inbox, project: string, m: Frame) => void> = [];
 
   constructor(cfg: Config, open: (cfg: Config) => Inbox = relayInbox) {
     this.cfg = cfg;
@@ -44,6 +45,8 @@ export class Inboxes {
       inbox = this.open(this.inProject(project, name));
       this.byIdentity.set(key, inbox);
       this.watcher?.(inbox, project);
+      const opened = inbox;
+      inbox.onMessage((m) => this.taps.forEach((tap) => tap(opened, project, m)));
       inbox.start();
     }
     return inbox;
@@ -53,6 +56,16 @@ export class Inboxes {
   watch(fn: (inbox: Inbox, project: string) => void): void {
     this.watcher = fn;
     for (const [key, inbox] of this.byIdentity) fn(inbox, key.slice(0, key.indexOf("/")));
+  }
+
+  /** Calls `fn` for every message stored in any inbox, now and later. */
+  tap(fn: (inbox: Inbox, project: string, m: Frame) => void): void {
+    this.taps.push(fn);
+  }
+
+  /** Every open inbox with its project. */
+  all(): Array<[string, Inbox]> {
+    return [...this.byIdentity].map(([key, inbox]) => [key.slice(0, key.indexOf("/")), inbox]);
   }
 
   closeAll(): void {

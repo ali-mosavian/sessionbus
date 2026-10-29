@@ -50,7 +50,7 @@ export class Inbox {
   private started = false;
   /** Pushed into the conversation already: hidden from `peek`, acked once nothing unpushed precedes them. */
   private pushed = new Set<number>();
-  private onStore?: (m: Frame) => void;
+  private listeners: Array<(m: Frame) => void> = [];
   private waiters: Array<() => void> = [];
   private wake?: () => void;
 
@@ -69,7 +69,7 @@ export class Inbox {
 
   /** Calls `fn` for each message already held and unpushed, then for each one stored later. */
   onMessage(fn: (m: Frame) => void): void {
-    this.onStore = fn;
+    this.listeners.push(fn);
     [...this.buf.values()].filter((m) => !this.pushed.has(m.id)).sort((a, b) => a.id - b.id).forEach(fn);
   }
 
@@ -78,6 +78,11 @@ export class Inbox {
     this.start();
     if (!this.buf.size && !this.ready) await this.untilReady();
     if (!this.buf.size && !this.ready) throw this.lastError ?? new Error("not connected to the relay");
+    return [...this.buf.values()].filter((m) => !this.pushed.has(m.id)).sort((a, b) => a.id - b.id);
+  }
+
+  /** The messages `peek` would return, without connecting or waiting. */
+  pending(): Frame[] {
     return [...this.buf.values()].filter((m) => !this.pushed.has(m.id)).sort((a, b) => a.id - b.id);
   }
 
@@ -131,7 +136,7 @@ export class Inbox {
     }
     this.buf.set(m.id, m);
     this.bytes += size(m);
-    this.onStore?.(m);
+    this.listeners.forEach((fn) => fn(m));
   }
 
   private async run(): Promise<void> {
