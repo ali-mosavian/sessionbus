@@ -1,12 +1,14 @@
-//! SQLite (WAL, synchronous=FULL) is the source of truth; a message is deleted only on ack.
-use rusqlite::{Connection, params};
-use serde::Serialize;
+//! SQLite (WAL, synchronous=FULL) is the source of truth; a message is deleted
+//! only on ack.
 use std::{
     fmt,
     path::Path,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+use rusqlite::{Connection, params};
+use serde::Serialize;
 
 #[derive(Debug)]
 pub struct BusErr(pub String);
@@ -18,7 +20,10 @@ impl BusErr {
 }
 
 impl fmt::Display for BusErr {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(
+        &self,
+        f: &mut fmt::Formatter,
+    ) -> fmt::Result {
         f.write_str(&self.0)
     }
 }
@@ -73,7 +78,10 @@ impl Db {
     }
 }
 
-pub fn touch(c: &Connection, name: &str) -> Res<()> {
+pub fn touch(
+    c: &Connection,
+    name: &str,
+) -> Res<()> {
     c.execute(
         "INSERT INTO agents(name, last_seen) VALUES(?1, ?2) ON CONFLICT(name) DO UPDATE SET last_seen=?2",
         params![name, now()],
@@ -86,12 +94,20 @@ pub fn agents(c: &Connection) -> Res<Vec<(String, i64)>> {
     Ok(s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?)
 }
 
-pub fn subscribe(c: &Connection, topic: &str, name: &str) -> Res<()> {
+pub fn subscribe(
+    c: &Connection,
+    topic: &str,
+    name: &str,
+) -> Res<()> {
     c.execute("INSERT OR IGNORE INTO subs(topic, name) VALUES(?1, ?2)", params![topic, name])?;
     Ok(())
 }
 
-pub fn unsubscribe(c: &Connection, topic: &str, name: &str) -> Res<()> {
+pub fn unsubscribe(
+    c: &Connection,
+    topic: &str,
+    name: &str,
+) -> Res<()> {
     c.execute("DELETE FROM subs WHERE topic=?1 AND name=?2", params![topic, name])?;
     Ok(())
 }
@@ -101,9 +117,14 @@ pub fn topics(c: &Connection) -> Res<Vec<(String, i64)>> {
     Ok(s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?)
 }
 
-/// Queues `body` for `target`: an agent name, or `#topic` for every subscriber except the sender.
-/// Returns the recipients; all inserts commit atomically.
-pub fn enqueue(c: &mut Connection, from: &str, target: &str, body: &str) -> Res<Vec<String>> {
+/// Queues `body` for `target`: an agent name, or `#topic` for every subscriber
+/// except the sender. Returns the recipients; all inserts commit atomically.
+pub fn enqueue(
+    c: &mut Connection,
+    from: &str,
+    target: &str,
+    body: &str,
+) -> Res<Vec<String>> {
     let tx = c.transaction()?;
     let (topic, recips): (Option<&str>, Vec<String>) = match target.strip_prefix('#') {
         Some(t) => {
@@ -112,7 +133,8 @@ pub fn enqueue(c: &mut Connection, from: &str, target: &str, body: &str) -> Res<
             (Some(t), names)
         }
         None => {
-            let known: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM agents WHERE name=?1)", [target], |r| r.get(0))?;
+            let known: bool =
+                tx.query_row("SELECT EXISTS(SELECT 1 FROM agents WHERE name=?1)", [target], |r| r.get(0))?;
             if !known {
                 return Err(BusErr::new("unknown recipient"));
             }
@@ -129,7 +151,12 @@ pub fn enqueue(c: &mut Connection, from: &str, target: &str, body: &str) -> Res<
     Ok(recips)
 }
 
-pub fn pending(c: &Connection, name: &str, after: i64, limit: i64) -> Res<Vec<Msg>> {
+pub fn pending(
+    c: &Connection,
+    name: &str,
+    after: i64,
+    limit: i64,
+) -> Res<Vec<Msg>> {
     let mut s = c.prepare(
         "SELECT id, from_name, to_name, topic, body, at FROM messages
          WHERE to_name=?1 AND id>?2 ORDER BY id LIMIT ?3",
@@ -140,7 +167,11 @@ pub fn pending(c: &Connection, name: &str, after: i64, limit: i64) -> Res<Vec<Ms
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-pub fn ack(c: &Connection, name: &str, upto: i64) -> Res<()> {
+pub fn ack(
+    c: &Connection,
+    name: &str,
+    upto: i64,
+) -> Res<()> {
     c.execute("DELETE FROM messages WHERE to_name=?1 AND id<=?2", params![name, upto])?;
     Ok(())
 }

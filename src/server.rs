@@ -1,7 +1,3 @@
-use crate::db::{self, BusErr, Db, Msg};
-use serde::Deserialize;
-use serde_json::{Value, json};
-use ssh_key::{PublicKey, SshSig};
 use std::{
     collections::HashMap,
     fmt::Display,
@@ -13,12 +9,18 @@ use std::{
     },
     time::Duration,
 };
+
+use serde::Deserialize;
+use serde_json::{Value, json};
+use ssh_key::{PublicKey, SshSig};
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, WriteHalf},
     net::TcpListener,
     sync::mpsc,
     time::timeout,
 };
+
+use crate::db::{self, BusErr, Db, Msg};
 
 pub const NAMESPACE: &str = "sessionbus";
 const MAX_BODY: usize = 1 << 20;
@@ -27,13 +29,27 @@ const BATCH: i64 = 500;
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase")]
 enum Req {
-    Hello { name: String, sig: String, #[serde(default)] listen: bool },
+    Hello {
+        name: String,
+        sig: String,
+        #[serde(default)]
+        listen: bool,
+    },
     List,
-    Send { to: String, body: String },
-    Sub { topic: String },
-    Unsub { topic: String },
+    Send {
+        to: String,
+        body: String,
+    },
+    Sub {
+        topic: String,
+    },
+    Unsub {
+        topic: String,
+    },
     Topics,
-    Ack { id: i64 },
+    Ack {
+        id: i64,
+    },
 }
 
 pub struct Hub {
@@ -44,12 +60,18 @@ pub struct Hub {
 }
 
 /// What a client signs to prove it holds the key registered for `name`.
-pub fn signed_payload(nonce: &str, name: &str) -> Vec<u8> {
+pub fn signed_payload(
+    nonce: &str,
+    name: &str,
+) -> Vec<u8> {
     format!("sessionbus-v1:{nonce}:{name}").into_bytes()
 }
 
 impl Hub {
-    pub fn new(db: Db, authorized_keys: PathBuf) -> Arc<Hub> {
+    pub fn new(
+        db: Db,
+        authorized_keys: PathBuf,
+    ) -> Arc<Hub> {
         Arc::new(Hub { db, keys: authorized_keys, conns: Mutex::default(), next: AtomicU64::new(1) })
     }
 
@@ -57,18 +79,29 @@ impl Hub {
         self.conns.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    fn notify(&self, name: &str) {
+    fn notify(
+        &self,
+        name: &str,
+    ) {
         for (_, tx) in self.conns().get(name).into_iter().flatten() {
             let _ = tx.send(());
         }
     }
 
-    fn online(&self, name: &str) -> bool {
+    fn online(
+        &self,
+        name: &str,
+    ) -> bool {
         self.conns().get(name).is_some_and(|v| !v.is_empty())
     }
 
     /// Re-read per hello so keys can be added without restarting the relay.
-    fn verify(&self, name: &str, nonce: &str, sig_pem: &str) -> bool {
+    fn verify(
+        &self,
+        name: &str,
+        nonce: &str,
+        sig_pem: &str,
+    ) -> bool {
         let Ok(sig) = SshSig::from_pem(sig_pem) else { return false };
         let Ok(text) = std::fs::read_to_string(&self.keys) else { return false };
         let msg = signed_payload(nonce, name);
@@ -94,14 +127,20 @@ fn err(e: impl Display) -> Value {
     json!({"op": "error", "error": e.to_string()})
 }
 
-async fn put<W: AsyncWrite + Unpin>(w: &mut W, v: &Value) -> io::Result<()> {
+async fn put<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    v: &Value,
+) -> io::Result<()> {
     let mut s = v.to_string();
     s.push('\n');
     w.write_all(s.as_bytes()).await?;
     w.flush().await
 }
 
-pub async fn run(listener: TcpListener, hub: Arc<Hub>) {
+pub async fn run(
+    listener: TcpListener,
+    hub: Arc<Hub>,
+) {
     loop {
         match listener.accept().await {
             Ok((sock, _)) => {
@@ -112,11 +151,17 @@ pub async fn run(listener: TcpListener, hub: Arc<Hub>) {
     }
 }
 
-pub async fn serve_conn<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(hub: Arc<Hub>, s: S) {
+pub async fn serve_conn<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    hub: Arc<Hub>,
+    s: S,
+) {
     let _ = handle(&hub, s).await;
 }
 
-async fn handle<S: AsyncRead + AsyncWrite + Unpin>(hub: &Arc<Hub>, s: S) -> io::Result<()> {
+async fn handle<S: AsyncRead + AsyncWrite + Unpin>(
+    hub: &Arc<Hub>,
+    s: S,
+) -> io::Result<()> {
     let (rd, mut wr) = tokio::io::split(s);
     let mut br = BufReader::new(rd);
     let nonce = nonce()?;
@@ -186,8 +231,14 @@ async fn session<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     }
 }
 
-/// Sends every queued message after `cursor`; messages stay queued until the client acks.
-async fn flush<W: AsyncWrite + Unpin>(hub: &Arc<Hub>, name: &str, mut cursor: i64, wr: &mut W) -> io::Result<i64> {
+/// Sends every queued message after `cursor`; messages stay queued until the
+/// client acks.
+async fn flush<W: AsyncWrite + Unpin>(
+    hub: &Arc<Hub>,
+    name: &str,
+    mut cursor: i64,
+    wr: &mut W,
+) -> io::Result<i64> {
     loop {
         let n = name.to_string();
         let msgs: Vec<Msg> = match hub.db.run(move |c| db::pending(c, &n, cursor, BATCH)).await {
@@ -216,7 +267,11 @@ fn topic_name(t: &str) -> Result<String, BusErr> {
     Ok(t.to_string())
 }
 
-async fn request(hub: &Arc<Hub>, me: &str, r: Req) -> Option<Value> {
+async fn request(
+    hub: &Arc<Hub>,
+    me: &str,
+    r: Req,
+) -> Option<Value> {
     let me = me.to_string();
     let out: Result<Value, BusErr> = async {
         Ok(match r {

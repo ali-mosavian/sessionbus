@@ -1,11 +1,13 @@
-//! Env: SESSIONBUS_NAME, SESSIONBUS_ADDR (default 127.0.0.1:8787), SESSIONBUS_KEY (default ~/.ssh/id_ed25519).
+//! Env: SESSIONBUS_NAME, SESSIONBUS_ADDR (default 127.0.0.1:8787),
+//! SESSIONBUS_KEY (default ~/.ssh/id_ed25519).
+use std::{env, path::PathBuf, process::exit, time::Duration};
+
 use serde_json::{Value, json};
 use sessionbus::{
     client::{Client, load_key},
     db::Db,
     server::{Hub, run},
 };
-use std::{env, path::PathBuf, process::exit, time::Duration};
 use tokio::{net::TcpListener, time::Instant};
 
 const USAGE: &str = "usage: sessionbus serve [--addr A] [--db F] [--keys F]
@@ -16,7 +18,10 @@ fn die(msg: impl std::fmt::Display) -> ! {
     exit(1)
 }
 
-fn opt(args: &mut Vec<String>, flag: &str) -> Option<String> {
+fn opt(
+    args: &mut Vec<String>,
+    flag: &str,
+) -> Option<String> {
     let i = args.iter().position(|a| a == flag)?;
     if i + 1 >= args.len() {
         die(format!("{flag} needs a value"));
@@ -47,12 +52,15 @@ async fn main() {
     }
 }
 
-async fn client_cmd(cmd: &str, mut args: Vec<String>) -> Result<(), String> {
+async fn client_cmd(
+    cmd: &str,
+    mut args: Vec<String>,
+) -> Result<(), String> {
     let name = env::var("SESSIONBUS_NAME").map_err(|_| "SESSIONBUS_NAME not set")?;
     let addr = env::var("SESSIONBUS_ADDR").unwrap_or("127.0.0.1:8787".into());
-    let key_path = env::var("SESSIONBUS_KEY").map(PathBuf::from).unwrap_or_else(|_| {
-        PathBuf::from(env::var("HOME").unwrap_or_default()).join(".ssh/id_ed25519")
-    });
+    let key_path = env::var("SESSIONBUS_KEY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(env::var("HOME").unwrap_or_default()).join(".ssh/id_ed25519"));
     let key = load_key(&key_path)?;
 
     if cmd == "inbox" {

@@ -1,3 +1,5 @@
+use std::{collections::HashMap, path::PathBuf, time::Duration};
+
 use serde_json::{Value, json};
 use sessionbus::{
     client::Client,
@@ -5,7 +7,6 @@ use sessionbus::{
     server::{Hub, run},
 };
 use ssh_key::{Algorithm, PrivateKey, rand_core::OsRng};
-use std::{collections::HashMap, path::PathBuf, time::Duration};
 use tokio::{net::TcpListener, task::JoinHandle, time::timeout};
 
 struct Rig {
@@ -14,7 +15,10 @@ struct Rig {
 }
 
 impl Rig {
-    fn new(test: &str, names: &[&str]) -> Rig {
+    fn new(
+        test: &str,
+        names: &[&str],
+    ) -> Rig {
         let dir = std::env::temp_dir().join(format!("sessionbus-{}-{test}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -22,10 +26,8 @@ impl Rig {
             .iter()
             .map(|n| (n.to_string(), PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap()))
             .collect();
-        let auth: String = keys
-            .iter()
-            .map(|(n, k)| format!("{n} {}\n", k.public_key().to_openssh().unwrap()))
-            .collect();
+        let auth: String =
+            keys.iter().map(|(n, k)| format!("{n} {}\n", k.public_key().to_openssh().unwrap())).collect();
         std::fs::write(dir.join("authorized_keys"), auth).unwrap();
         Rig { dir, keys }
     }
@@ -39,7 +41,12 @@ impl Rig {
         (addr, tokio::spawn(run(l, hub)))
     }
 
-    async fn conn(&self, addr: &str, name: &str, listen: bool) -> Client {
+    async fn conn(
+        &self,
+        addr: &str,
+        name: &str,
+        listen: bool,
+    ) -> Client {
         let mut c = Client::connect(addr, name, &self.keys[name], listen).await.unwrap();
         if listen {
             assert_eq!(c.next().await.unwrap().unwrap()["op"], "ready");
@@ -54,7 +61,11 @@ async fn msg(c: &mut Client) -> Value {
     v
 }
 
-async fn send(c: &mut Client, to: &str, body: &str) -> Value {
+async fn send(
+    c: &mut Client,
+    to: &str,
+    body: &str,
+) -> Value {
     c.call(json!({"op": "send", "to": to, "body": body})).await.unwrap()
 }
 
@@ -73,7 +84,8 @@ async fn direct_messages_arrive_in_order() {
     }
 }
 
-/// Drain-on-read lost messages whenever the connection dropped after the relay wrote them.
+/// Drain-on-read lost messages whenever the connection dropped after the relay
+/// wrote them.
 #[tokio::test]
 async fn unacked_message_is_redelivered_after_reconnect() {
     let rig = Rig::new("redeliver", &["a", "b"]);
@@ -105,7 +117,8 @@ async fn acked_message_is_not_redelivered() {
     let mut b = Client::connect(&addr, "b", &rig.keys["b"], true).await.unwrap();
     let m = msg(&mut b).await;
     b.ack(m["id"].as_i64().unwrap()).await.unwrap();
-    // The ack is fire-and-forget; a round trip on another connection orders it before the reconnect.
+    // The ack is fire-and-forget; a round trip on another connection orders it
+    // before the reconnect.
     let mut b_ctl = rig.conn(&addr, "b", false).await;
     b_ctl.call(json!({"op": "list"})).await.unwrap();
     drop(b);

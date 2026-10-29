@@ -1,11 +1,13 @@
-use crate::server::{NAMESPACE, signed_payload};
+use std::path::Path;
+
 use serde_json::{Value, json};
 use ssh_key::{HashAlg, LineEnding, PrivateKey};
-use std::path::Path;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, ReadHalf, WriteHalf},
     net::TcpStream,
 };
+
+use crate::server::{NAMESPACE, signed_payload};
 
 pub struct Client {
     rd: Lines<BufReader<ReadHalf<TcpStream>>>,
@@ -22,8 +24,14 @@ pub fn load_key(path: &Path) -> Result<PrivateKey, String> {
 }
 
 impl Client {
-    /// Connects and authenticates as `name`. `listen` clients receive pushed messages.
-    pub async fn connect(addr: &str, name: &str, key: &PrivateKey, listen: bool) -> Result<Client, String> {
+    /// Connects and authenticates as `name`. `listen` clients receive pushed
+    /// messages.
+    pub async fn connect(
+        addr: &str,
+        name: &str,
+        key: &PrivateKey,
+        listen: bool,
+    ) -> Result<Client, String> {
         let s = TcpStream::connect(addr).await.map_err(|e| format!("{addr}: {e}"))?;
         let (rd, wr) = tokio::io::split(s);
         let mut c = Client { rd: BufReader::new(rd).lines(), wr };
@@ -41,7 +49,10 @@ impl Client {
         }
     }
 
-    pub async fn send(&mut self, v: &Value) -> Result<(), String> {
+    pub async fn send(
+        &mut self,
+        v: &Value,
+    ) -> Result<(), String> {
         let mut s = v.to_string();
         s.push('\n');
         self.wr.write_all(s.as_bytes()).await.map_err(|e| e.to_string())
@@ -55,8 +66,12 @@ impl Client {
         }
     }
 
-    /// One request, one reply. Not for `listen` connections, whose stream also carries pushes.
-    pub async fn call(&mut self, v: Value) -> Result<Value, String> {
+    /// One request, one reply. Not for `listen` connections, whose stream also
+    /// carries pushes.
+    pub async fn call(
+        &mut self,
+        v: Value,
+    ) -> Result<Value, String> {
         self.send(&v).await?;
         let r = self.next().await?.ok_or("connection closed")?;
         if r["op"] == "error" {
@@ -65,7 +80,10 @@ impl Client {
         Ok(r)
     }
 
-    pub async fn ack(&mut self, id: i64) -> Result<(), String> {
+    pub async fn ack(
+        &mut self,
+        id: i64,
+    ) -> Result<(), String> {
         self.send(&json!({"op": "ack", "id": id})).await
     }
 }
