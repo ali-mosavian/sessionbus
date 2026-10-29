@@ -1,10 +1,15 @@
-use std::path::Path;
+use std::{
+    env,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use serde_json::{Value, json};
 use ssh_key::{HashAlg, LineEnding, PrivateKey};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, ReadHalf, WriteHalf},
     net::TcpStream,
+    time::{Instant, timeout_at},
 };
 
 use crate::server::{NAMESPACE, signed_payload};
@@ -21,6 +26,36 @@ pub fn load_key(path: &Path) -> Result<PrivateKey, String> {
         return Err(format!("{}: encrypted keys are not supported", path.display()));
     }
     Ok(key)
+}
+
+/// Connection settings from SESSIONBUS_NAME, SESSIONBUS_ADDR (default
+/// 127.0.0.1:8787) and SESSIONBUS_KEY (default ~/.ssh/id_ed25519).
+pub struct Config {
+    pub addr: String,
+    pub name: Option<String>,
+    pub key_path: PathBuf,
+}
+
+impl Config {
+    pub fn from_env() -> Config {
+        Config {
+            addr: env::var("SESSIONBUS_ADDR").unwrap_or("127.0.0.1:8787".into()),
+            name: env::var("SESSIONBUS_NAME").ok(),
+            key_path: env::var("SESSIONBUS_KEY")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from(env::var("HOME").unwrap_or_default()).join(".ssh/id_ed25519")),
+        }
+    }
+
+    /// Fails per call, not at startup, so a misconfigured MCP server still
+    /// answers `initialize` and reports the problem from the tool.
+    pub async fn connect(
+        &self,
+        listen: bool,
+    ) -> Result<Client, String> {
+        let name = self.name.as_deref().ok_or("SESSIONBUS_NAME not set")?;
+        Client::connect(&self.addr, name, &load_key(&self.key_path)?, listen).await
+    }
 }
 
 impl Client {
@@ -85,5 +120,57 @@ impl Client {
         id: i64,
     ) -> Result<(), String> {
         self.send(&json!({"op": "ack", "id": id})).await
+    }
+
+    /// Like `ack`, but returns once the relay has applied it: requests on one
+    /// connection run in order, so the reply to a following request proves it.
+    pub async fn ack_sync(
+        &mut self,
+        id: i64,
+    ) -> Result<(), String> {
+        self.ack(id).await?;
+        self.send(&json!({"op": "topics"})).await?;
+        loop {
+            match self.next().await? {
+                Some(v) if v["op"] == "topics" => return Ok(()),
+                Some(v) if v["op"] == "error" => return Err(v["error"].as_str().unwrap_or("error").into()),
+                Some(_) => {}
+                None => return Err("connection closed".into()),
+            }
+        }
+    }
+
+    /// Queued messages, oldest first, from a `listen` connection. When none are
+    /// queued and `wait` is non-zero, waits up to `wait` for the first one.
+    /// Messages stay queued until acked.
+    pub async fn inbox(
+        &mut self,
+        wait: Duration,
+    ) -> Result<Vec<Value>, String> {
+        let deadline = Instant::now() + wait;
+        let (mut out, mut ready) = (Vec::new(), false);
+        loop {
+            let frame = if ready {
+                match timeout_at(deadline, self.next()).await {
+                    Ok(f) => f?,
+                    Err(_) => return Ok(out),
+                }
+            } else {
+                self.next().await?
+            };
+            let Some(v) = frame else { return Err("connection closed".into()) };
+            match v["op"].as_str() {
+                Some("msg") => {
+                    out.push(v);
+                    if ready {
+                        return Ok(out);
+                    }
+                }
+                Some("ready") if !out.is_empty() || wait.is_zero() => return Ok(out),
+                Some("ready") => ready = true,
+                Some("error") => return Err(v["error"].as_str().unwrap_or("error").into()),
+                _ => {}
+            }
+        }
     }
 }

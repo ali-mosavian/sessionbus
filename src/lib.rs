@@ -6,4 +6,5 @@
 //! ssh key (see `authorized_keys`).
 pub mod client;
 pub mod db;
+pub mod mcp;
 pub mod server;

@@ -1,17 +1,18 @@
 //! Env: SESSIONBUS_NAME, SESSIONBUS_ADDR (default 127.0.0.1:8787),
-//! SESSIONBUS_KEY (default ~/.ssh/id_ed25519).
-use std::{env, path::PathBuf, process::exit, time::Duration};
+//! SESSIONBUS_KEY (default ~/.ssh/id_ed25519). `mcp` serves MCP on stdio.
+use std::{env, process::exit, sync::Arc, time::Duration};
 
 use serde_json::{Value, json};
 use sessionbus::{
-    client::{Client, load_key},
+    client::Config,
     db::Db,
+    mcp,
     server::{Hub, run},
 };
-use tokio::{net::TcpListener, time::Instant};
+use tokio::net::TcpListener;
 
 const USAGE: &str = "usage: sessionbus serve [--addr A] [--db F] [--keys F]
-       sessionbus list | topics | sub <topic> | unsub <topic> | send <to|#topic> <message> | inbox [--wait SECS]";
+       sessionbus list | topics | sub <topic> | unsub <topic> | send <to|#topic> <message> | inbox [--wait SECS] | mcp";
 
 fn die(msg: impl std::fmt::Display) -> ! {
     eprintln!("sessionbus: {msg}");
@@ -56,41 +57,21 @@ async fn client_cmd(
     cmd: &str,
     mut args: Vec<String>,
 ) -> Result<(), String> {
-    let name = env::var("SESSIONBUS_NAME").map_err(|_| "SESSIONBUS_NAME not set")?;
-    let addr = env::var("SESSIONBUS_ADDR").unwrap_or("127.0.0.1:8787".into());
-    let key_path = env::var("SESSIONBUS_KEY")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env::var("HOME").unwrap_or_default()).join(".ssh/id_ed25519"));
-    let key = load_key(&key_path)?;
-
+    let cfg = Config::from_env();
+    if cmd == "mcp" {
+        return mcp::serve(Arc::new(cfg), tokio::io::stdin(), tokio::io::stdout()).await.map_err(|e| e.to_string());
+    }
     if cmd == "inbox" {
         let wait: u64 = opt(&mut args, "--wait").map_or(Ok(0), |w| w.parse()).map_err(|_| "bad --wait")?;
-        let mut c = Client::connect(&addr, &name, &key, true).await?;
-        let mut deadline = None;
-        loop {
-            let frame = match deadline {
-                None => c.next().await?,
-                Some(d) => match tokio::time::timeout_at(d, c.next()).await {
-                    Ok(f) => f?,
-                    Err(_) => return Ok(()),
-                },
-            };
-            let Some(v) = frame else { return Ok(()) };
-            match v["op"].as_str() {
-                Some("msg") => {
-                    println!("{v}");
-                    c.ack(v["id"].as_i64().unwrap_or(0)).await?;
-                }
-                Some("ready") => {
-                    if wait == 0 {
-                        return Ok(());
-                    }
-                    deadline = Some(Instant::now() + Duration::from_secs(wait));
-                }
-                Some("error") => return Err(v["error"].as_str().unwrap_or("error").into()),
-                _ => {}
-            }
+        let mut c = cfg.connect(true).await?;
+        let msgs = c.inbox(Duration::from_secs(wait)).await?;
+        for m in &msgs {
+            println!("{m}");
         }
+        if let Some(last) = msgs.last() {
+            c.ack_sync(last["id"].as_i64().unwrap_or(0)).await?;
+        }
+        return Ok(());
     }
 
     let req: Value = match (cmd, args.as_slice()) {
@@ -101,7 +82,6 @@ async fn client_cmd(
         ("send", [to, msg @ ..]) if !msg.is_empty() => json!({"op": "send", "to": to, "body": msg.join(" ")}),
         _ => return Err(USAGE.into()),
     };
-    let mut c = Client::connect(&addr, &name, &key, false).await?;
-    println!("{}", c.call(req).await?);
+    println!("{}", cfg.connect(false).await?.call(req).await?);
     Ok(())
 }
