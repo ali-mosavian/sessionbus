@@ -5,12 +5,16 @@ import { BusError, Conn, type Config, type Frame } from "./client.ts";
 import { TAG, ago, plural, wrap } from "./format.ts";
 
 export type Args = Record<string, any>;
+/** What a tool runs against. */
+export interface Ctx {
+  cfg: Config;
+}
 /** `after` runs once the reply was written or failed; `delivered` says which. */
 export type ToolResult = { text: string; after?: (delivered: boolean) => Promise<void> };
 export interface Tool {
   description: string;
   input: object;
-  run(cfg: Config, args: Args): Promise<ToolResult>;
+  run(ctx: Ctx, args: Args): Promise<ToolResult>;
 }
 
 const schema = (properties: object, required: string[] = []) => ({
@@ -54,7 +58,7 @@ const topicName = (args: Args): string => {
 const topicTool = (op: "sub" | "unsub", done: string, description: string): Tool => ({
   description,
   input: schema({ topic: { type: "string", description: "Topic name, with or without a leading #" } }, ["topic"]),
-  run: async (cfg, args) => {
+  run: async ({ cfg }, args) => {
     const topic = topicName(args);
     await once(cfg, (c) => c.call({ op, topic }));
     return { text: `${done} #${topic}.` };
@@ -70,7 +74,7 @@ export const TOOLS: Record<string, Tool> = {
       "session's name: the name IS the address for SendMessage. 'online' means it has a live listener right now; " +
       "an offline session still receives messages and reads them when it next connects.",
     input: schema({}),
-    run: async (cfg) => {
+    run: async ({ cfg }) => {
       const r = await once(cfg, (c) => c.call({ op: "list" }));
       const rows = (r.agents as Frame[])
         .filter((a) => a.name !== cfg.name)
@@ -112,7 +116,7 @@ export const TOOLS: Record<string, Tool> = {
       },
       ["to", "message"],
     ),
-    run: async (cfg, args) => {
+    run: async ({ cfg }, args) => {
       const { to, message, summary, reply_to, status, priority } = args;
       if (typeof to !== "string" || !to || to.length > MAX_TO || /[\r\n]/.test(to)) {
         throw new Error(`\`to\` must be a single-line name of at most ${MAX_TO} characters`);
@@ -147,7 +151,7 @@ export const TOOLS: Record<string, Tool> = {
       { ids: { type: "array", items: { type: "integer", minimum: 1 }, minItems: 1, maxItems: MAX_IDS } },
       ["ids"],
     ),
-    run: async (cfg, args) => {
+    run: async ({ cfg }, args) => {
       const ids = args.ids;
       if (!Array.isArray(ids) || !ids.length || ids.length > MAX_IDS || !ids.every(Number.isInteger)) {
         throw new Error(`\`ids\` must be 1 to ${MAX_IDS} message ids`);
@@ -165,7 +169,7 @@ export const TOOLS: Record<string, Tool> = {
       `come first, the rest oldest first. ${LABELS} They count as read once this reply is delivered. Messages ` +
       "are not pushed: call this when you expect a reply or were told one is waiting.",
     input: schema({}),
-    run: async (cfg) => {
+    run: async ({ cfg }) => {
       const c = await openListener(cfg);
       let msgs: Frame[];
       try {
@@ -194,7 +198,7 @@ export const TOOLS: Record<string, Tool> = {
   ListTopics: {
     description: "List the topics that have subscribers, with their subscriber counts.",
     input: schema({}),
-    run: async (cfg) => {
+    run: async ({ cfg }) => {
       const r = await once(cfg, (c) => c.call({ op: "topics" }));
       const rows = (r.topics as Frame[]).map((t) => `#${t.topic} — ${plural(t.subscribers, "subscriber")}`);
       return { text: rows.join("\n") || "No topics." };

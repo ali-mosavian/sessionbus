@@ -72,7 +72,7 @@ class Mcp {
   nextId = 1;
 
   constructor(cfg: Config) {
-    this.done = serve(cfg, this.input, this.output);
+    this.done = serve({ cfg }, this.input, this.output);
     this.lines = createInterface({ input: this.output })[Symbol.asyncIterator]();
   }
 

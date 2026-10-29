@@ -3,8 +3,7 @@
 import type { Readable, Writable } from "node:stream";
 import { createInterface } from "node:readline";
 
-import type { Config } from "./client.ts";
-import { TOOLS } from "./tools.ts";
+import { TOOLS, type Ctx } from "./tools.ts";
 
 const DEFAULT_VERSION = "2025-06-18";
 const INSTRUCTIONS =
@@ -18,7 +17,7 @@ const toolList = () =>
 
 type Reply = { body: Record<string, unknown>; after?: (delivered: boolean) => Promise<void> };
 
-async function handle(cfg: Config, req: any): Promise<Reply> {
+async function handle(ctx: Ctx, req: any): Promise<Reply> {
   const params = req.params ?? {};
   switch (req.method) {
     case "initialize":
@@ -40,7 +39,7 @@ async function handle(cfg: Config, req: any): Promise<Reply> {
       try {
         const tool = TOOLS[String(params.name ?? "")];
         if (!tool) throw new Error(`unknown tool \`${params.name}\``);
-        const r = await tool.run(cfg, params.arguments ?? {});
+        const r = await tool.run(ctx, params.arguments ?? {});
         return { body: { result: { content: [{ type: "text", text: r.text }], isError: false } }, after: r.after };
       } catch (e) {
         return { body: { result: { content: [{ type: "text", text: (e as Error).message }], isError: true } } };
@@ -52,14 +51,14 @@ async function handle(cfg: Config, req: any): Promise<Reply> {
 
 const write = (out: Writable, s: string) => new Promise<boolean>((done) => out.write(s, (err) => done(!err)));
 
-async function handleLine(cfg: Config, out: Writable, line: string): Promise<void> {
+async function handleLine(ctx: Ctx, out: Writable, line: string): Promise<void> {
   let id: unknown = null;
   let reply: Reply;
   try {
     const req = JSON.parse(line);
     if (req.id === undefined) return; // notification
     id = req.id;
-    reply = await handle(cfg, req);
+    reply = await handle(ctx, req);
   } catch (e) {
     reply = { body: { error: { code: -32700, message: (e as Error).message } } };
   }
@@ -69,12 +68,12 @@ async function handleLine(cfg: Config, out: Writable, line: string): Promise<voi
 }
 
 /** Serves until `input` ends, then waits for in-flight requests and their acks. */
-export async function serve(cfg: Config, input: Readable, output: Writable): Promise<void> {
+export async function serve(ctx: Ctx, input: Readable, output: Writable): Promise<void> {
   output.on("error", () => {});
   const inflight = new Set<Promise<void>>();
   for await (const line of createInterface({ input, crlfDelay: Infinity })) {
     if (!line.trim()) continue;
-    const p: Promise<void> = handleLine(cfg, output, line).finally(() => inflight.delete(p));
+    const p: Promise<void> = handleLine(ctx, output, line).finally(() => inflight.delete(p));
     inflight.add(p);
   }
   await Promise.all(inflight);

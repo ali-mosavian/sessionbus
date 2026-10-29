@@ -3,4 +3,4 @@
 import { configFromEnv } from "./client.ts";
 import { serve } from "./server.ts";
 
-await serve(configFromEnv(), process.stdin, process.stdout);
+await serve({ cfg: configFromEnv() }, process.stdin, process.stdout);
