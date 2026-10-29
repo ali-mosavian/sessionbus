@@ -15,8 +15,9 @@ export function pushTrusted(inbox: Inbox, allow: Set<string>, emit: (params: obj
   inbox.onMessage((m: Frame) => {
     if (!allow.has(m.from) || m.topic) return; // topic messages name their sender but are not individually vouched for
     const params = { content: wrap(m), meta: { from: String(m.from), id: String(m.id) } };
+    inbox.hold(m.id); // before the write: a ReadNotifications racing the push must not return it too
     void emit(params)
-      .then(async (ok) => void (ok && (await inbox.markPushed(m.id))))
-      .catch(() => {});
+      .then(async (ok) => (ok ? await inbox.markPushed(m.id) : inbox.release(m.id)))
+      .catch(() => inbox.release(m.id));
   });
 }

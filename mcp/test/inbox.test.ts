@@ -163,3 +163,15 @@ test("a pushed message is hidden from reads and acked only behind nothing unread
   assert.deepEqual(ids(await inbox.peek()), [3]);
   inbox.close();
 });
+
+test("a message being pushed is not offered to a read, and is again if the push fails", { timeout: 5000 }, async () => {
+  const w = new FakeWire();
+  const inbox = new Inbox(opener([w]), noAck, FAST);
+  w.msg(1).ready();
+  assert.deepEqual(ids(await inbox.peek()), [1]);
+  inbox.hold(1);
+  assert.deepEqual(ids(await inbox.peek()), [], "returned a message whose push was in flight");
+  inbox.release(1);
+  assert.deepEqual(ids(await inbox.peek()), [1]);
+  inbox.close();
+});

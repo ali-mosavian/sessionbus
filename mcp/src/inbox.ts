@@ -81,9 +81,19 @@ export class Inbox {
     return [...this.buf.values()].filter((m) => !this.pushed.has(m.id)).sort((a, b) => a.id - b.id);
   }
 
+  /** Hides `id` from `peek` while a push of it is in flight, so a concurrent read cannot hand it out too. */
+  hold(id: number): void {
+    this.pushed.add(id);
+  }
+
+  /** The push of `id` failed: offer it to `peek` again. */
+  release(id: number): void {
+    this.pushed.delete(id);
+  }
+
   /** `id` reached Claude by push. The relay is told once no unread message precedes it. */
   async markPushed(id: number): Promise<void> {
-    this.pushed.add(id);
+    this.hold(id);
     const ids = [...this.buf.keys()].sort((a, b) => a - b);
     const firstUnpushed = ids.find((i) => !this.pushed.has(i));
     const covered = ids.filter((i) => firstUnpushed === undefined || i < firstUnpushed);
