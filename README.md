@@ -15,7 +15,7 @@ Or download `sessionbus-<target>.tar.gz` and `SHA256SUMS` from the [latest relea
 MCP for Claude Code (Node >= 22.18, nothing to build):
 
 ```sh
-claude mcp add sessionbus -e SESSIONBUS_NAME=me -e SESSIONBUS_PROJECTS=llrm -e SESSIONBUS_ADDR=127.0.0.1:8787 -- \
+claude mcp add --scope user sessionbus -e SESSIONBUS_ADDR=127.0.0.1:8787 -- \
   npx -y https://github.com/ali-mosavian/sessionbus/releases/latest/download/sessionbus-mcp.tgz
 ```
 
@@ -34,7 +34,7 @@ Research preview: start Claude Code interactively with `--dangerously-load-devel
 
 ## Projects
 
-Every MCP tool takes a required `project` (e.g. `llrm`). Sessions only see others in the same project: `list`, `topics`, direct sends and `#topic` broadcasts never cross it, and another project's sessions are unknown recipients. On the relay a session is `project/name`; in tool calls and messages it is just `name`, and received messages carry a `project` attribute. Projects separate work on one relay; they are not access control beyond the keys file.
+Every MCP tool takes a required `project` (e.g. `llrm`). Sessions only see others in the same project: `list`, `topics`, direct sends and `#topic` broadcasts never cross it, and another project's sessions are unknown recipients. A session names itself with `as` on its first call (e.g. `as: "coordinator"`) and the name is remembered for later calls, so one shared MCP config serves any number of sessions, each with its own name; the second session to claim a name is refused. On the relay a session is `project/name`; in tool calls and messages it is just `name`, and received messages carry a `project` attribute. Projects separate work on one relay; they are not access control beyond the keys file.
 
 One key per machine is enough: list its default ssh public key as `llrm/*` in `authorized_keys` and every session on that machine may sign in as any `llrm/<name>` (and nothing outside `llrm/`). A key listed under several entries is refused for all of them.
 
@@ -56,7 +56,7 @@ Messages arrive wrapped as `<cross-session-message from=".." id=".." ..>`; reply
 
 Sends are budgeted per sender (`serve --burst 100 --rate 20`; urgent sends have their own budget of 10, 1/s). Over budget fails with `rate_limited` and `retry_after_ms`; nothing is dropped silently. Use one ssh key per session: a key listed under several names is refused for all of them. Error frames carry a `code` (`bad_request`, `auth`, `unknown_recipient`, `rate_limited`, `internal`).
 
-Env: `SESSIONBUS_NAME` (this session's name within a project), `SESSIONBUS_PROJECTS` (comma-separated projects to be online in from boot; others are joined on first `ReadNotifications`), `SESSIONBUS_ADDR` (default `127.0.0.1:8787`), `SESSIONBUS_KEY` (default `~/.ssh/id_ed25519`, unencrypted ed25519).
+Env: `SESSIONBUS_NAME` (optional default for `as`), `SESSIONBUS_PROJECTS` (with a name: projects to be online in from boot; otherwise a session is online from its first call), `SESSIONBUS_ADDR` (default `127.0.0.1:8787`), `SESSIONBUS_KEY` (default `~/.ssh/id_ed25519`, unencrypted ed25519).
 
 Tests (need the relay built): `cargo build && cd mcp && npm install && npm test`.
 
