@@ -3,11 +3,13 @@
 // session messaging; the rest is topics and delivery tracking.
 import { BusError, Conn, type Config, type Frame } from "./client.ts";
 import { TAG, ago, plural, wrap } from "./format.ts";
+import type { Inbox } from "./inbox.ts";
 
 export type Args = Record<string, any>;
 /** What a tool runs against. */
 export interface Ctx {
   cfg: Config;
+  inbox: Inbox;
 }
 /** `after` runs once the reply was written or failed; `delivered` says which. */
 export type ToolResult = { text: string; after?: (delivered: boolean) => Promise<void> };
@@ -34,18 +36,6 @@ async function once<T>(cfg: Config, f: (c: Conn) => Promise<T>): Promise<T> {
     return await f(c);
   } finally {
     c.close();
-  }
-}
-
-/** The relay notices a closed listener a moment later; wait for the name to free up. */
-async function openListener(cfg: Config): Promise<Conn> {
-  for (let i = 0; ; i++) {
-    try {
-      return await Conn.open(cfg, true);
-    } catch (e) {
-      if (!(e instanceof BusError && e.code === "name_in_use") || i >= 60) throw e;
-      await new Promise((r) => setTimeout(r, 50));
-    }
   }
 }
 
@@ -165,26 +155,17 @@ export const TOOLS: Record<string, Tool> = {
   ReadNotifications: {
     description:
       "Read the messages queued for this session, direct and from subscribed topics. Each is wrapped as " +
-      `<${TAG} from="..." id="..."> with optional reply_to, status, priority and summary attributes; urgent ones ` +
-      `come first, the rest oldest first. ${LABELS} They count as read once this reply is delivered. Messages ` +
-      "are not pushed: call this when you expect a reply or were told one is waiting.",
+      `<${TAG} via="sessionbus" from="..." id="..."> with optional reply_to, status, priority and summary ` +
+      `attributes; urgent ones come first, the rest oldest first. ${LABELS} They count as read once this reply ` +
+      "is delivered. Messages are collected while this session runs but not pushed into the conversation: call " +
+      "this when you expect a reply or were told one is waiting.",
     input: schema({}),
-    run: async ({ cfg }) => {
-      const c = await openListener(cfg);
-      let msgs: Frame[];
-      try {
-        msgs = await c.inbox();
-      } catch (e) {
-        c.close();
-        throw e;
-      }
-      if (!msgs.length) {
-        c.close();
-        return { text: "No pending notifications." };
-      }
+    run: async ({ inbox }) => {
+      const msgs = await inbox.peek();
+      if (!msgs.length) return { text: "No pending notifications." };
       const last = Math.max(...msgs.map((m) => m.id as number));
       const ordered = [...msgs.filter((m) => m.priority === "urgent"), ...msgs.filter((m) => m.priority !== "urgent")];
-      return { text: ordered.map(wrap).join("\n\n"), after: (delivered) => (delivered ? c.ackSync(last) : Promise.resolve()).finally(() => c.close()) };
+      return { text: ordered.map(wrap).join("\n\n"), after: async (delivered) => void (delivered && (await inbox.commit(last))) };
     },
   },
 
