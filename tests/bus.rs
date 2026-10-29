@@ -530,3 +530,26 @@ async fn error_frames_carry_a_machine_readable_code() {
     raw.read_line(&mut line).await.unwrap();
     assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["code"], "auth");
 }
+
+/// `delivered` outlived the listener it was pushed to: a sender kept reading
+/// "delivered" for a message nobody could receive any more.
+#[tokio::test]
+async fn delivered_reverts_to_queued_when_the_listener_drops() {
+    let rig = Rig::new("undeliver", &["a", "b"]);
+    let (addr, _db, _hub) = rig.start_hub(false, UNLIMITED).await;
+    drop(rig.conn(&addr, "b", false).await);
+    let mut a = rig.conn(&addr, "a", false).await;
+    let id = send(&mut a, "b", "x").await["ids"][0].as_i64().unwrap();
+
+    let mut b = Client::connect(&addr, "b", &rig.keys["b"], true).await.unwrap();
+    assert_eq!(msg(&mut b).await["id"], id);
+    assert_eq!(state(&mut a, id).await, "delivered");
+    drop(b);
+    for _ in 0..40 {
+        if state(&mut a, id).await == "queued" {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("still {} after the listener dropped", state(&mut a, id).await);
+}

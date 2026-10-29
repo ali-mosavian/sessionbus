@@ -133,6 +133,16 @@ impl Ledger {
         lock(&self.0).entry(name.to_string()).or_default().pushed.extend(ids);
     }
 
+    /// The listener is gone: what was pushed to it is queued again.
+    pub fn forget_pushed(
+        &self,
+        name: &str,
+    ) {
+        if let Some(r) = lock(&self.0).get_mut(name) {
+            r.pushed.clear();
+        }
+    }
+
     /// For each `(recipient, id, read in the database)`.
     pub fn states(
         &self,

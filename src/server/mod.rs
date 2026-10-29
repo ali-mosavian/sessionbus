@@ -147,6 +147,9 @@ async fn handle<S: AsyncRead + AsyncWrite + Unpin>(
     let registration = listen.then(|| hub.listeners.register(&name, wake.clone()));
     let res = session(hub, &name, listen, br, &mut wr, &wake).await;
     drop(registration);
+    if listen && !hub.listeners.online(&name) {
+        hub.ledger.forget_pushed(&name);
+    }
     let n = name.clone();
     let _ = hub.db.run(move |c| db::touch(c, &n)).await;
     res
