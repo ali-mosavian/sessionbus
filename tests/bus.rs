@@ -627,6 +627,35 @@ async fn list_shows_how_many_messages_each_agent_has_unread() {
     assert_eq!(unread(&r, "b"), json!(0), "an acked message still counted as unread");
 }
 
+#[tokio::test]
+async fn namespaces_keep_projects_apart() {
+    let rig = Rig::new("ns", &["p/a", "p/b", "q/c", "loose"]);
+    let (addr, _db, _hub) = rig.start_hub(false, UNLIMITED).await;
+    for n in ["p/b", "q/c", "loose"] {
+        drop(rig.conn(&addr, n, false).await);
+    }
+    let mut a = rig.conn(&addr, "p/a", false).await;
+    let names = |r: &Value| -> Vec<String> {
+        r["agents"].as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap().to_string()).collect()
+    };
+    let r = a.call(json!({"op": "list"})).await.unwrap();
+    assert_eq!(names(&r), ["p/a", "p/b"], "list leaked another namespace");
+
+    let err = a.call(json!({"op": "send", "to": "q/c", "body": "x"})).await.unwrap_err();
+    assert!(err.to_string().contains("unknown recipient"), "a direct send crossed namespaces: {err}");
+    assert!(a.call(json!({"op": "send", "to": "loose", "body": "x"})).await.is_err(), "reached the default namespace");
+
+    for n in ["p/b", "q/c"] {
+        let mut c = rig.conn(&addr, n, false).await;
+        c.call(json!({"op": "sub", "topic": "t"})).await.unwrap();
+    }
+    let r = send(&mut a, "#t", "x").await;
+    let got: Vec<&str> = r["recipients"].as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap()).collect();
+    assert_eq!(got, ["p/b"], "a topic send crossed namespaces");
+    let r = a.call(json!({"op": "topics"})).await.unwrap();
+    assert_eq!(r["topics"][0]["subscribers"], 1, "topic counts include other namespaces");
+}
+
 async fn listen(
     addr: &str,
     name: &str,

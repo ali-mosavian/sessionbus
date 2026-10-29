@@ -23,7 +23,11 @@ pub fn nonce() -> io::Result<String> {
 }
 
 pub fn valid_name(n: &str) -> bool {
-    !n.is_empty() && n.len() <= 64 && !n.starts_with('#') && !n.contains(char::is_whitespace)
+    !n.is_empty()
+        && n.len() <= 64
+        && !n.starts_with(['#', '/'])
+        && !n.ends_with('/')
+        && !n.contains(char::is_whitespace)
 }
 
 /// Re-reads `keys` on every call so keys can be added without a restart. A
@@ -48,4 +52,15 @@ pub fn verify(
         .filter(|(n, _)| *n == name)
         .filter(|(_, k)| listed.iter().all(|(other, k2)| *other == name || k2.key_data() != k.key_data()))
         .any(|(_, k)| k.verify(NAMESPACE, &msg, &sig).is_ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_name;
+
+    #[test]
+    fn a_namespace_needs_a_name_on_both_sides_of_the_slash() {
+        assert!(valid_name("proj/w1") && valid_name("w1"));
+        assert!(!valid_name("/w1") && !valid_name("proj/"), "an empty namespace or name was accepted");
+    }
 }

@@ -7,6 +7,10 @@ sessionbus serve --addr 127.0.0.1:8787 --db bus.db --keys authorized_keys   # ke
 ssh -N -L 8787:127.0.0.1:8787 relayhost                                     # from other machines
 ```
 
+## Namespaces
+
+A name `proj/worker` belongs to namespace `proj`; a name without `/` is in the default namespace. `list`, `topics`, direct sends and `#topic` broadcasts only see the sender's own namespace: another namespace's agents are unknown recipients. Namespaces separate projects on one relay; they are not access control beyond that (the keys file is). There is no cross-namespace messaging.
+
 ## Claude Code
 
 Needs Node >= 22.18 (runs the TypeScript directly, no build, no dependencies).

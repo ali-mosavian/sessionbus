@@ -20,8 +20,8 @@ pub async fn dispatch(
 ) -> Res<Option<Value>> {
     let reply = match req {
         Req::Hello { .. } => Err(BusErr::bad_request("already authenticated")),
-        Req::List => list(hub).await,
-        Req::Topics => topics(hub).await,
+        Req::List => list(hub, me).await,
+        Req::Topics => topics(hub, me).await,
         Req::Ping => Ok(json!({"op": "pong"})),
         Req::Sub { topic } => sub(hub, me, &topic, true).await,
         Req::Unsub { topic } => sub(hub, me, &topic, false).await,
@@ -35,9 +35,13 @@ pub async fn dispatch(
     reply.map(Some)
 }
 
-async fn list(hub: &Hub) -> Res<Value> {
+async fn list(
+    hub: &Hub,
+    me: &str,
+) -> Res<Value> {
     hub.apply_acks().await; // a just-acked message must not count as unread
-    let rows = hub.db.read(|c| db::agents(c)).await?;
+    let ns = db::namespace(me).to_string();
+    let rows = hub.db.read(move |c| db::agents(c, &ns)).await?;
     let agents: Vec<Value> = rows
         .into_iter()
         .map(|(n, t, u)| json!({"name": n, "online": hub.listeners.online(&n), "last_seen": t, "unread": u}))
@@ -45,8 +49,12 @@ async fn list(hub: &Hub) -> Res<Value> {
     Ok(json!({"op": "agents", "agents": agents}))
 }
 
-async fn topics(hub: &Hub) -> Res<Value> {
-    let rows = hub.db.read(|c| db::topics(c)).await?;
+async fn topics(
+    hub: &Hub,
+    me: &str,
+) -> Res<Value> {
+    let ns = db::namespace(me).to_string();
+    let rows = hub.db.read(move |c| db::topics(c, &ns)).await?;
     let topics: Vec<Value> = rows.into_iter().map(|(t, n)| json!({"topic": t, "subscribers": n})).collect();
     Ok(json!({"op": "topics", "topics": topics}))
 }

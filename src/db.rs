@@ -219,14 +219,25 @@ pub fn touch(
     Ok(())
 }
 
-/// `(name, last_seen, unread)` per agent.
-pub fn agents(c: &Connection) -> Res<Vec<(String, i64, i64)>> {
+/// The project a name belongs to: what precedes its first `/`, or "" for a
+/// plain name. Agents, topics and sends never cross namespaces.
+pub fn namespace(name: &str) -> &str {
+    name.split_once('/').map_or("", |(ns, _)| ns)
+}
+
+/// `(name, last_seen, unread)` per agent in `ns`.
+pub fn agents(
+    c: &Connection,
+    ns: &str,
+) -> Res<Vec<(String, i64, i64)>> {
     let mut s = c.prepare(
         "SELECT name, last_seen,
                 (SELECT COUNT(*) FROM messages WHERE to_name = agents.name AND read_at IS NULL)
          FROM agents ORDER BY name",
     )?;
-    Ok(s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<Result<_, _>>()?)
+    let all: Vec<(String, i64, i64)> =
+        s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<Result<_, _>>()?;
+    Ok(all.into_iter().filter(|(n, ..)| namespace(n) == ns).collect())
 }
 
 pub fn subscribe(
@@ -247,9 +258,25 @@ pub fn unsubscribe(
     Ok(())
 }
 
-pub fn topics(c: &Connection) -> Res<Vec<(String, i64)>> {
-    let mut s = c.prepare("SELECT topic, COUNT(*) FROM subs GROUP BY topic ORDER BY topic")?;
-    Ok(s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?)
+/// Topics with their subscriber counts, among the agents of `ns`.
+pub fn topics(
+    c: &Connection,
+    ns: &str,
+) -> Res<Vec<(String, i64)>> {
+    let mut s = c.prepare("SELECT topic, name FROM subs ORDER BY topic")?;
+    let rows = s.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let mut out: Vec<(String, i64)> = Vec::new();
+    for row in rows {
+        let (t, n) = row?;
+        if namespace(&n) != ns {
+            continue;
+        }
+        match out.last_mut() {
+            Some((last, count)) if *last == t => *count += 1,
+            _ => out.push((t, 1)),
+        }
+    }
+    Ok(out)
 }
 
 /// Applies `acks` (name, highest acked id) and then queues `body` for
@@ -281,13 +308,14 @@ fn queue(
     let (topic, recips): (Option<&str>, Vec<String>) = match target.strip_prefix('#') {
         Some(t) => {
             let mut s = c.prepare("SELECT name FROM subs WHERE topic=?1 AND name<>?2 ORDER BY name")?;
-            let names = s.query_map(params![t, from], |r| r.get(0))?.collect::<Result<_, _>>()?;
+            let names: Vec<String> = s.query_map(params![t, from], |r| r.get(0))?.collect::<Result<_, _>>()?;
+            let names = names.into_iter().filter(|n| namespace(n) == namespace(from)).collect();
             (Some(t), names)
         }
         None => {
             let known: bool =
                 c.query_row("SELECT EXISTS(SELECT 1 FROM agents WHERE name=?1)", [target], |r| r.get(0))?;
-            if !known {
+            if !known || namespace(target) != namespace(from) {
                 return Err(BusErr::new("unknown_recipient", "unknown recipient"));
             }
             (None, vec![target.to_string()])
