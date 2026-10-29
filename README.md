@@ -15,7 +15,7 @@ Or download `sessionbus-<target>.tar.gz` and `SHA256SUMS` from the [latest relea
 MCP for Claude Code (Node >= 22.18, nothing to build):
 
 ```sh
-claude mcp add sessionbus -e SESSIONBUS_NAME=proj/me -e SESSIONBUS_ADDR=127.0.0.1:8787 -- \
+claude mcp add sessionbus -e SESSIONBUS_PROJECT=llrm -e SESSIONBUS_NAME=me -e SESSIONBUS_ADDR=127.0.0.1:8787 -- \
   npx -y https://github.com/ali-mosavian/sessionbus/releases/latest/download/sessionbus-mcp.tgz
 ```
 
@@ -32,18 +32,18 @@ Set `SESSIONBUS_CHANNEL_FROM=name1,name2` and the MCP declares Claude Code's `cl
 
 Research preview: start Claude Code interactively with `--dangerously-load-development-channels server:<name>` (ignored with `-p` and the Agent SDK; claude.ai or Console auth; Team/Enterprise orgs must enable channels). Not yet exercised in a real CLI here; the protocol is tested against the documented notification shape only.
 
-## Namespaces
+## Projects
+
+Sessions belong to a project; the relay name is `project/name` (the MCP joins `SESSIONBUS_PROJECT` and `SESSIONBUS_NAME`, and refuses to start without a project). `list`, `topics`, direct sends and `#topic` broadcasts only see the sender's own project: another project's sessions are unknown recipients. Projects separate work on one relay; they are not access control beyond the keys file. There is no cross-project messaging.
 
 One key per machine is enough: list its default ssh public key as `llrm/*` and every session on that machine may sign in as any `llrm/<name>` (and nothing outside `llrm/`). A key listed under several entries is refused for all of them.
-
-A name `proj/worker` belongs to namespace `proj`; a name without `/` is in the default namespace. `list`, `topics`, direct sends and `#topic` broadcasts only see the sender's own namespace: another namespace's agents are unknown recipients. Namespaces separate projects on one relay; they are not access control beyond that (the keys file is). There is no cross-namespace messaging.
 
 ## Claude Code
 
 Needs Node >= 22.18 (runs the TypeScript directly, no build, no dependencies).
 
 ```sh
-claude mcp add sessionbus -e SESSIONBUS_NAME=<this-session> -- node /path/to/sessionbus/mcp/src/index.ts
+claude mcp add sessionbus -e SESSIONBUS_PROJECT=<project> -e SESSIONBUS_NAME=<this-session> -- node /path/to/sessionbus/mcp/src/index.ts
 ```
 
 Tools mirror the built-in session messaging, plus tracking and topics:
@@ -56,7 +56,7 @@ Messages arrive wrapped as `<cross-session-message from=".." id=".." ..>`; reply
 
 Sends are budgeted per sender (`serve --burst 100 --rate 20`; urgent sends have their own budget of 10, 1/s). Over budget fails with `rate_limited` and `retry_after_ms`; nothing is dropped silently. Use one ssh key per session: a key listed under several names is refused for all of them. Error frames carry a `code` (`bad_request`, `auth`, `unknown_recipient`, `rate_limited`, `internal`).
 
-Env: `SESSIONBUS_NAME`, `SESSIONBUS_ADDR` (default `127.0.0.1:8787`), `SESSIONBUS_KEY` (default `~/.ssh/id_ed25519`, unencrypted ed25519).
+Env: `SESSIONBUS_PROJECT` (required), `SESSIONBUS_NAME` (short name; the relay name is `project/name`), `SESSIONBUS_ADDR` (default `127.0.0.1:8787`), `SESSIONBUS_KEY` (default `~/.ssh/id_ed25519`, unencrypted ed25519).
 
 Tests (need the relay built): `cargo build && cd mcp && npm install && npm test`.
 

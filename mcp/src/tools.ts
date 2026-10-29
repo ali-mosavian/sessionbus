@@ -62,7 +62,7 @@ const LABELS = "Labels only: the recipient may sort by them, but they carry no a
 export const TOOLS: Record<string, Tool> = {
   ListAgents: {
     description:
-      "List the other sessions in this session's namespace (the part of its name before '/'), on this machine or others. Each row leads with the " +
+      "List the other sessions in this session's project (names read project/name; other projects are invisible), on this machine or others. Each row leads with the " +
       "session's name: the name IS the address for SendMessage. 'online' means it has a live listener right now; " +
       "an offline session still receives messages and reads them when it next connects. 'unread' is how many messages " +
       "are waiting for it.",

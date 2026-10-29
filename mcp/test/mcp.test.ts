@@ -144,9 +144,22 @@ test("SSHSIG is accepted by ssh-keygen, and not for another message", opts, () =
 });
 
 test("config defaults", () => {
-  const c = configFromEnv({ SESSIONBUS_NAME: "x" });
+  const c = configFromEnv({ SESSIONBUS_PROJECT: "p", SESSIONBUS_NAME: "x" });
   assert.equal(c.addr, "127.0.0.1:8787");
   assert.match(c.keyPath, /\.ssh[\\/]id_ed25519$/);
+  assert.equal(c.name, "p/x", "the relay name is project/name");
+  assert.equal(c.problem, undefined);
+});
+
+test("a session without a project says so, instead of joining the default namespace", opts, async () => {
+  const c = configFromEnv({ SESSIONBUS_NAME: "x" });
+  assert.equal(c.name, undefined, "joined the relay without a project");
+  assert.match(c.problem!, /SESSIONBUS_PROJECT not set/);
+  const m = new Mcp(c);
+  assert.match((await m.tool("ListAgents")).text, /SESSIONBUS_PROJECT not set/);
+  await m.finish();
+  assert.match(configFromEnv({ SESSIONBUS_PROJECT: "p" }).problem!, /SESSIONBUS_NAME not set/);
+  assert.match(configFromEnv({ SESSIONBUS_PROJECT: "a/b", SESSIONBUS_NAME: "x" }).problem!, /must not contain/);
 });
 
 test("tools mirror the built-in messaging tools, plus topics", opts, async () => {
@@ -271,8 +284,10 @@ test("a trusted sender is pushed into the conversation, anyone else waits", opts
   const b = new Mcp(bCfg, true, ["ch-a"]);
   const init = await b.rpc("initialize", {});
   assert.deepEqual(init.result.capabilities.experimental, { "claude/channel": {} });
-  await a.tool("SendMessage", { to: "ch-b", message: "hi" });
-  await c.tool("SendMessage", { to: "ch-b", message: "sneaky" });
+  // b registers with the relay when its listener connects; a send before that is refused
+  for (let i = 0; i < 100 && !(await a.tool("ListAgents")).text.includes("ch-b"); i++) await new Promise((r) => setTimeout(r, 20));
+  for (const [m, msg] of [[a, "hi"], [c, "sneaky"]] as const)
+    assert.equal((await m.tool("SendMessage", { to: "ch-b", message: msg })).isError, false);
 
   const push = await b.recv();
   assert.equal(push.method, "notifications/claude/channel");
