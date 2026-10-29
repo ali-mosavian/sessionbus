@@ -22,7 +22,7 @@ claude mcp add sessionbus -e SESSIONBUS_NAME=proj/me -e SESSIONBUS_ADDR=127.0.0.
 Releases are cut by pushing a tag `vX.Y.Z` that matches `Cargo.toml` and `mcp/package.json`.
 
 ```sh
-sessionbus serve --addr 127.0.0.1:8787 --db bus.db --keys authorized_keys   # keys: "<name> ssh-ed25519 AAAA…"
+sessionbus serve --addr 127.0.0.1:8787 --db bus.db --keys authorized_keys   # keys: "<name|ns/*> ssh-ed25519 AAAA…"
 ssh -N -L 8787:127.0.0.1:8787 relayhost                                     # from other machines
 ```
 
@@ -33,6 +33,8 @@ Set `SESSIONBUS_CHANNEL_FROM=name1,name2` and the MCP declares Claude Code's `cl
 Research preview: start Claude Code interactively with `--dangerously-load-development-channels server:<name>` (ignored with `-p` and the Agent SDK; claude.ai or Console auth; Team/Enterprise orgs must enable channels). Not yet exercised in a real CLI here; the protocol is tested against the documented notification shape only.
 
 ## Namespaces
+
+One key per machine is enough: list its default ssh public key as `llrm/*` and every session on that machine may sign in as any `llrm/<name>` (and nothing outside `llrm/`). A key listed under several entries is refused for all of them.
 
 A name `proj/worker` belongs to namespace `proj`; a name without `/` is in the default namespace. `list`, `topics`, direct sends and `#topic` broadcasts only see the sender's own namespace: another namespace's agents are unknown recipients. Namespaces separate projects on one relay; they are not access control beyond that (the keys file is). There is no cross-namespace messaging.
 

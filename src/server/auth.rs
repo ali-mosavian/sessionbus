@@ -30,9 +30,23 @@ pub fn valid_name(n: &str) -> bool {
         && !n.contains(char::is_whitespace)
 }
 
+/// Whether an `authorized_keys` entry covers `name`: an exact name, or `ns/*`
+/// for every name in that namespace, so one key per machine serves all of its
+/// sessions.
+fn covers(
+    entry: &str,
+    name: &str,
+) -> bool {
+    match entry.strip_suffix('*') {
+        Some(prefix) if prefix.ends_with('/') => name.len() > prefix.len() && name.starts_with(prefix),
+        _ => entry == name,
+    }
+}
+
 /// Re-reads `keys` on every call so keys can be added without a restart. A
-/// key listed under several names is refused for all of them: its holder
-/// could sign in as any.
+/// key listed under several entries is refused for all of them: its holder
+/// could sign in as any. List a key once, as `ns/*` if it should serve a
+/// namespace.
 pub fn verify(
     keys: &Path,
     name: &str,
@@ -49,8 +63,8 @@ pub fn verify(
         .collect();
     listed
         .iter()
-        .filter(|(n, _)| *n == name)
-        .filter(|(_, k)| listed.iter().all(|(other, k2)| *other == name || k2.key_data() != k.key_data()))
+        .filter(|(entry, _)| covers(entry, name))
+        .filter(|(entry, k)| listed.iter().all(|(other, k2)| other == entry || k2.key_data() != k.key_data()))
         .any(|(_, k)| k.verify(NAMESPACE, &msg, &sig).is_ok())
 }
 

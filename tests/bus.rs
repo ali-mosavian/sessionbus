@@ -656,6 +656,20 @@ async fn namespaces_keep_projects_apart() {
     assert_eq!(r["topics"][0]["subscribers"], 1, "topic counts include other namespaces");
 }
 
+#[tokio::test]
+async fn a_namespace_key_signs_in_any_name_in_its_namespace_and_no_other() {
+    let rig = Rig::new("wild", &["p/*", "q/solo"]);
+    let (addr, _db, _hub) = rig.start_hub(false, UNLIMITED).await;
+    let key = &rig.keys["p/*"];
+    for name in ["p/a", "p/b"] {
+        assert!(Client::connect(&addr, name, key, false).await.is_ok(), "{name} refused under p/*");
+    }
+    for name in ["q/a", "p", "pp/a", "q/solo"] {
+        assert!(Client::connect(&addr, name, key, false).await.is_err(), "{name} accepted under p/*");
+    }
+    assert!(Client::connect(&addr, "p/a", &rig.keys["q/solo"], false).await.is_err(), "exact key reached another name");
+}
+
 async fn listen(
     addr: &str,
     name: &str,
