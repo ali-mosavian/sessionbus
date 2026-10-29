@@ -20,19 +20,76 @@ pub async fn dispatch(
 ) -> Res<Option<Value>> {
     let reply = match req {
         Req::Hello { .. } => Err(BusErr::bad_request("already authenticated")),
-        Req::List => list(hub, me).await,
-        Req::Topics => topics(hub, me).await,
+        Req::Projects => projects(hub).await,
+        Req::AddProject { project } => add_project(hub, &project).await,
         Req::Ping => Ok(json!({"op": "pong"})),
-        Req::Sub { topic } => sub(hub, me, &topic, true).await,
-        Req::Unsub { topic } => sub(hub, me, &topic, false).await,
-        Req::Send(r) => send(hub, me, r).await,
-        Req::Status { ids } => status(hub, me, ids).await,
+        Req::List => gated(hub, me, list(hub, me)).await,
+        Req::Topics => gated(hub, me, topics(hub, me)).await,
+        Req::Sub { topic } => gated(hub, me, sub(hub, me, &topic, true)).await,
+        Req::Unsub { topic } => gated(hub, me, sub(hub, me, &topic, false)).await,
+        Req::Send(r) => gated(hub, me, send(hub, me, r)).await,
+        Req::Status { ids } => gated(hub, me, status(hub, me, ids)).await,
         Req::Ack { id } => {
             hub.ledger.ack(me, id);
             return Ok(None);
         }
     };
     reply.map(Some)
+}
+
+/// Runs `op` only if `me`'s project is registered. Plain names (no project) are
+/// exempt.
+async fn gated(
+    hub: &Hub,
+    me: &str,
+    op: impl Future<Output = Res<Value>>,
+) -> Res<Value> {
+    require_project(hub, me).await?;
+    op.await
+}
+
+pub async fn require_project(
+    hub: &Hub,
+    me: &str,
+) -> Res<()> {
+    let ns = db::namespace(me).to_string();
+    if ns.is_empty() {
+        return Ok(());
+    }
+    let known = hub.db.read(|c| db::projects(c)).await?;
+    if known.iter().any(|(n, _)| *n == ns) {
+        return Ok(());
+    }
+    let list = if known.is_empty() {
+        "none".to_string()
+    } else {
+        known.into_iter().map(|(n, _)| n).collect::<Vec<_>>().join(", ")
+    };
+    Err(BusErr::new(
+        "unknown_project",
+        format!(
+            "project \"{ns}\" is not registered. Registered projects: {list}. A project is registered once, on purpose; do not register one to work around this error."
+        ),
+    ))
+}
+
+async fn projects(hub: &Hub) -> Res<Value> {
+    let rows = hub.db.read(|c| db::projects(c)).await?;
+    let projects: Vec<Value> = rows.into_iter().map(|(n, a)| json!({"name": n, "agents": a})).collect();
+    Ok(json!({"op": "projects", "projects": projects}))
+}
+
+async fn add_project(
+    hub: &Hub,
+    project: &str,
+) -> Res<Value> {
+    if project.is_empty() || project.len() > 64 || project.contains(|c: char| c.is_whitespace() || c == '/' || c == '#')
+    {
+        return Err(BusErr::bad_request("a project name is 1..64 characters without spaces, '/' or '#'"));
+    }
+    let p = project.to_string();
+    let created = hub.db.run(move |c| db::add_project(c, &p)).await?;
+    Ok(json!({"op": "project", "name": project, "created": created}))
 }
 
 async fn list(

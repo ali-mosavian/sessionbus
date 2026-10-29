@@ -149,7 +149,8 @@ impl Db {
              CREATE TABLE IF NOT EXISTS messages(
                  id INTEGER PRIMARY KEY AUTOINCREMENT, from_name TEXT NOT NULL, to_name TEXT NOT NULL,
                  topic TEXT, body TEXT NOT NULL, at INTEGER NOT NULL,
-                 reply_to INTEGER, status TEXT, priority TEXT, summary TEXT, read_at INTEGER);",
+                 reply_to INTEGER, status TEXT, priority TEXT, summary TEXT, read_at INTEGER);
+             CREATE TABLE IF NOT EXISTS projects(name TEXT PRIMARY KEY, created_at INTEGER NOT NULL);",
         )?;
         migrate(&c)?;
         c.execute_batch(
@@ -205,6 +206,12 @@ fn migrate(c: &Connection) -> Res<()> {
             c.execute_batch(&format!("ALTER TABLE messages ADD COLUMN {col} {ty}"))?;
         }
     }
+    // sessions that predate the registry keep working
+    c.execute(
+        "INSERT OR IGNORE INTO projects(name, created_at)
+         SELECT DISTINCT substr(name, 1, instr(name, '/') - 1), ?1 FROM agents WHERE instr(name, '/') > 1",
+        [now()],
+    )?;
     Ok(())
 }
 
@@ -238,6 +245,23 @@ pub fn agents(
     let all: Vec<(String, i64, i64)> =
         s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<Result<_, _>>()?;
     Ok(all.into_iter().filter(|(n, ..)| namespace(n) == ns).collect())
+}
+
+/// Registered projects with the number of agents in each.
+pub fn projects(c: &Connection) -> Res<Vec<(String, i64)>> {
+    let mut s = c.prepare(
+        "SELECT p.name, (SELECT COUNT(*) FROM agents WHERE substr(name, 1, length(p.name) + 1) = p.name || '/')
+         FROM projects p ORDER BY p.name",
+    )?;
+    Ok(s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?)
+}
+
+/// Whether the project was new.
+pub fn add_project(
+    c: &Connection,
+    name: &str,
+) -> Res<bool> {
+    Ok(c.execute("INSERT OR IGNORE INTO projects(name, created_at) VALUES(?1, ?2)", params![name, now()])? > 0)
 }
 
 pub fn subscribe(

@@ -177,6 +177,32 @@ export const TOOLS: Record<string, Tool> = {
     },
   },
 
+  ListProjects: {
+    description:
+      "List the registered projects on the relay, with how many sessions each has. Only these names can be used as " +
+      "`project`; if a call fails because its project is not registered, pick one of these (or fix the typo).",
+    input: schema({}),
+    run: async ({ cfg }) => {
+      const r = await once(cfg, (c) => c.call({ op: "projects" }));
+      const rows = (r.projects as Frame[]).map((p) => `${p.name} — ${plural(p.agents, "session")}`);
+      return { text: rows.join("\n") || "No projects registered." };
+    },
+  },
+
+  RegisterProject: {
+    description:
+      "Register a NEW project name on the relay, once, for everybody. Do this ONLY when your user explicitly told " +
+      "you to create that project. NEVER register a project to get past an 'unknown project' error or because a " +
+      "name looks right: that error means a typo or the wrong name, so call ListProjects and use an existing " +
+      "project. `project` here is the new name.",
+    input: schema({}),
+    run: async ({ cfg, project, inbox }) => {
+      const r = await once(cfg, (c) => c.call({ op: "addproject", project }));
+      inbox.start(); // the project exists now, so this session can come online in it
+      return { text: r.created ? `Registered project ${project}.` : `Project ${project} was already registered.` };
+    },
+  },
+
   Subscribe: topicTool(
     "sub",
     "Subscribed to",

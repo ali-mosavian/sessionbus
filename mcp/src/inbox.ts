@@ -147,6 +147,8 @@ export class Inbox {
         await this.pump(wire);
       } catch (e) {
         this.lastError = e as Error;
+        // Retrying cannot help until someone registers the project; the next `start` (a read) tries again.
+        if ((e as { code?: string }).code === "unknown_project") return void (this.started = false);
       }
       this.wire = undefined;
       this.ready = false;

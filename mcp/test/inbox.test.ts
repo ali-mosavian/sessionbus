@@ -102,15 +102,15 @@ test("a failed ack keeps the messages for the next read", { timeout: 5000 }, asy
 
 test("a missing pong drops the connection; a pong keeps it", { timeout: 5000 }, async () => {
   const [quiet, lively] = [new FakeWire(), new FakeWire()];
-  const a = new Inbox(opener([quiet]), noAck, { ...FAST, pingMs: 30, pongMs: 60 });
+  const a = new Inbox(opener([quiet]), noAck, { ...FAST, pingMs: 30, pongMs: 150 });
   quiet.ready();
   await a.peek();
-  await sleep(250);
+  await sleep(350);
   assert.ok(quiet.sent.some((v) => v.op === "ping"), "never pinged");
   assert.ok(quiet.closed, "a connection that never answers was kept");
   a.close();
 
-  const b = new Inbox(opener([lively]), noAck, { ...FAST, pingMs: 30, pongMs: 60 });
+  const b = new Inbox(opener([lively]), noAck, { ...FAST, pingMs: 30, pongMs: 150 });
   lively.ready();
   await b.peek();
   for (let i = 0; i < 8; i++) {

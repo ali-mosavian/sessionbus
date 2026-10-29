@@ -26,6 +26,10 @@ pub enum Req {
         topic: String,
     },
     Topics,
+    Projects,
+    AddProject {
+        project: String,
+    },
     /// Keeps a listening connection from being dropped as silent.
     Ping,
     Ack {

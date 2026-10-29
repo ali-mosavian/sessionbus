@@ -64,7 +64,21 @@ before(async () => {
   writeFileSync(join(dir, "authorized_keys"), "");
   addr = await startRelay("main");
   limitedAddr = await startRelay("limited", ["--burst", "2", "--rate", "0.001"]);
+  for (const at of [addr, limitedAddr]) await register(at, [P, "px", "py"]);
 });
+
+/** Projects must be registered once before use; the tests' projects are registered here. */
+async function register(at: string, projects: string[]): Promise<void> {
+  for (const p of projects) {
+    const who = `registrar-${at.split(":")[1]}`;
+    const c = await Conn.open({ ...session(who, at, p), name: `${p}/${who}` }, false);
+    try {
+      await c.call({ op: "addproject", project: p });
+    } finally {
+      c.close();
+    }
+  }
+}
 
 const allInboxes: Inboxes[] = [];
 after(() => {
@@ -212,6 +226,22 @@ test("a session names itself on its first call, and the name sticks", opts, asyn
   await Promise.all([m.finish(), peer.finish()]);
 });
 
+test("an unregistered project is refused with the registered ones, and registering is explicit", opts, async () => {
+  const m = new Mcp(session("reg-a", addr, "newproj"));
+  const refused = await m.tool("ListAgents", { project: "newproj" });
+  assert.equal(refused.isError, true);
+  assert.match(refused.text, /project "newproj" is not registered\. Registered projects: .*\bt\b/);
+  assert.match((await m.tool("ListProjects", { project: "newproj" })).text, /^t — \d+ sessions?$/m);
+  assert.match((await m.tool("RegisterProject", { project: "newproj" })).text, /Registered project newproj/);
+  assert.match((await m.tool("RegisterProject", { project: "newproj" })).text, /already registered/);
+  assert.equal((await m.tool("ListAgents", { project: "newproj" })).isError, false);
+  const tools = (await m.rpc("tools/list")).result.tools;
+  const reg = tools.find((t: any) => t.name === "RegisterProject");
+  assert.match(reg.description, /ONLY when your user explicitly told/);
+  assert.match(reg.description, /NEVER register a project to get past/);
+  await m.finish();
+});
+
 test("tools mirror the built-in messaging tools, plus topics", opts, async () => {
   const m = new Mcp(session("init"));
   const init = await m.rpc("initialize", { protocolVersion: "2025-03-26" });
@@ -219,7 +249,10 @@ test("tools mirror the built-in messaging tools, plus topics", opts, async () =>
   const tools = (await m.rpc("tools/list")).result.tools;
   assert.deepEqual(
     tools.map((t: any) => t.name),
-    ["ListAgents", "SendMessage", "MessageStatus", "ReadNotifications", "Subscribe", "Unsubscribe", "ListTopics"],
+    [
+      "ListAgents", "SendMessage", "MessageStatus", "ReadNotifications", "ListProjects", "RegisterProject",
+      "Subscribe", "Unsubscribe", "ListTopics",
+    ],
   );
   const by = Object.fromEntries(tools.map((t: any) => [t.name, t.inputSchema]));
   assert.deepEqual(by.SendMessage.required, ["project", "to", "message"]);

@@ -218,6 +218,9 @@ async fn session<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     wr: &mut WriteHalf<W>,
     wake: &Notify,
 ) -> io::Result<()> {
+    if listen && let Err(e) = ops::require_project(hub, name).await {
+        return put(wr, &err_frame(&e)).await;
+    }
     let n = name.to_string();
     if let Err(e) = hub.db.run(move |c| db::touch(c, &n)).await {
         return put(wr, &err_frame(&e)).await;

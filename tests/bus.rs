@@ -631,6 +631,7 @@ async fn list_shows_how_many_messages_each_agent_has_unread() {
 async fn namespaces_keep_projects_apart() {
     let rig = Rig::new("ns", &["p/a", "p/b", "q/c", "loose"]);
     let (addr, _db, _hub) = rig.start_hub(false, UNLIMITED).await;
+    register(&rig, &addr, &["p/a", "q/c"]).await;
     for n in ["p/b", "q/c", "loose"] {
         drop(rig.conn(&addr, n, false).await);
     }
@@ -668,6 +669,67 @@ async fn a_namespace_key_signs_in_any_name_in_its_namespace_and_no_other() {
         assert!(Client::connect(&addr, name, key, false).await.is_err(), "{name} accepted under p/*");
     }
     assert!(Client::connect(&addr, "p/a", &rig.keys["q/solo"], false).await.is_err(), "exact key reached another name");
+}
+
+/// Registers each name's project through that name's own connection.
+async fn register(
+    rig: &Rig,
+    addr: &str,
+    names: &[&str],
+) {
+    for n in names {
+        let mut c = rig.conn(addr, n, false).await;
+        c.call(json!({"op": "addproject", "project": db::namespace(n)})).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn an_unregistered_project_is_refused_and_the_registered_ones_are_listed() {
+    let rig = Rig::new("proj", &["p/a", "zz/a"]);
+    let (addr, _db, _hub) = rig.start_hub(false, UNLIMITED).await;
+    let mut a = rig.conn(&addr, "p/a", false).await;
+    let mut z = rig.conn(&addr, "zz/a", false).await;
+
+    let e = a.call(json!({"op": "send", "to": "p/b", "body": "x"})).await.unwrap_err().to_string();
+    assert!(e.contains("not registered"), "a send in an unregistered project was accepted: {e}");
+    assert!(a.call(json!({"op": "list"})).await.is_err(), "list worked in an unregistered project");
+    assert!(
+        a.call(json!({"op": "topics"})).await.is_err() && a.call(json!({"op": "sub", "topic": "t"})).await.is_err()
+    );
+
+    assert_eq!(a.call(json!({"op": "addproject", "project": "p"})).await.unwrap()["created"], true);
+    assert_eq!(a.call(json!({"op": "addproject", "project": "p"})).await.unwrap()["created"], false);
+    assert!(a.call(json!({"op": "addproject", "project": "a b"})).await.is_err(), "a bad project name was registered");
+    assert!(a.call(json!({"op": "list"})).await.is_ok());
+
+    let e = z.call(json!({"op": "send", "to": "zz/b", "body": "x"})).await.unwrap_err().to_string();
+    assert!(e.contains("Registered projects: p"), "the error must name the registered projects: {e}");
+    let r = z.call(json!({"op": "projects"})).await.unwrap();
+    assert_eq!(
+        r["projects"].as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap()).collect::<Vec<_>>(),
+        ["p"]
+    );
+    let e = Client::connect(&addr, "zz/a", &rig.keys["zz/a"], true).await.err().expect("listener accepted").to_string();
+    assert!(e.contains("not registered"), "a listener joined an unregistered project: {e}");
+}
+
+#[tokio::test]
+async fn projects_of_an_existing_database_are_registered_on_upgrade() {
+    let dir = std::env::temp_dir().join(format!("sessionbus-{}-projmig", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("old.db");
+    {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch(
+            "CREATE TABLE agents(name TEXT PRIMARY KEY, last_seen INTEGER NOT NULL);
+             INSERT INTO agents VALUES('llrm/w1', 1), ('llrm/w2', 1), ('plain', 1);",
+        )
+        .unwrap();
+    }
+    let db = Db::open(&path).unwrap();
+    let got: Vec<String> = db.read(|c| db::projects(c)).await.unwrap().into_iter().map(|(n, _)| n).collect();
+    assert_eq!(got, ["llrm"], "sessions already in a project locked out by the registry");
 }
 
 async fn listen(
