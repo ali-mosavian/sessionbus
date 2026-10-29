@@ -219,9 +219,14 @@ pub fn touch(
     Ok(())
 }
 
-pub fn agents(c: &Connection) -> Res<Vec<(String, i64)>> {
-    let mut s = c.prepare("SELECT name, last_seen FROM agents ORDER BY name")?;
-    Ok(s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?)
+/// `(name, last_seen, unread)` per agent.
+pub fn agents(c: &Connection) -> Res<Vec<(String, i64, i64)>> {
+    let mut s = c.prepare(
+        "SELECT name, last_seen,
+                (SELECT COUNT(*) FROM messages WHERE to_name = agents.name AND read_at IS NULL)
+         FROM agents ORDER BY name",
+    )?;
+    Ok(s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<Result<_, _>>()?)
 }
 
 pub fn subscribe(

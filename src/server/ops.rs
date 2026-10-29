@@ -36,9 +36,12 @@ pub async fn dispatch(
 }
 
 async fn list(hub: &Hub) -> Res<Value> {
+    hub.apply_acks().await; // a just-acked message must not count as unread
     let rows = hub.db.read(|c| db::agents(c)).await?;
-    let agents: Vec<Value> =
-        rows.into_iter().map(|(n, t)| json!({"name": n, "online": hub.listeners.online(&n), "last_seen": t})).collect();
+    let agents: Vec<Value> = rows
+        .into_iter()
+        .map(|(n, t, u)| json!({"name": n, "online": hub.listeners.online(&n), "last_seen": t, "unread": u}))
+        .collect();
     Ok(json!({"op": "agents", "agents": agents}))
 }
 

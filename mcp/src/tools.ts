@@ -62,13 +62,17 @@ export const TOOLS: Record<string, Tool> = {
     description:
       "List the other sessions reachable through sessionbus, on this machine or others. Each row leads with the " +
       "session's name: the name IS the address for SendMessage. 'online' means it has a live listener right now; " +
-      "an offline session still receives messages and reads them when it next connects.",
+      "an offline session still receives messages and reads them when it next connects. 'unread' is how many messages " +
+      "are waiting for it.",
     input: schema({}),
     run: async ({ cfg }) => {
       const r = await once(cfg, (c) => c.call({ op: "list" }));
       const rows = (r.agents as Frame[])
         .filter((a) => a.name !== cfg.name)
-        .map((a) => `${a.name} — ${a.online ? "online" : `offline, last seen ${ago(a.last_seen)}`}`);
+        .map((a) => {
+          const state = a.online ? "online" : `offline, last seen ${ago(a.last_seen)}`;
+          return `${a.name} — ${state}${a.unread ? `, ${a.unread} unread` : ""}`;
+        });
       return { text: rows.join("\n") || "No other sessions known yet." };
     },
   },

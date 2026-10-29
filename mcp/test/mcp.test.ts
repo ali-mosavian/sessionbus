@@ -246,6 +246,16 @@ test("ListAgents omits this session and shows presence", opts, async () => {
   await a.finish();
 });
 
+test("ListAgents shows how many messages wait for a session", opts, async () => {
+  const [a, bCfg] = [new Mcp(session("un-a")), session("un-b")];
+  await Mcp.once(bCfg, "ListAgents");
+  await a.tool("SendMessage", { to: "un-b", message: "x" });
+  assert.match((await a.tool("ListAgents")).text, /^un-b — offline, last seen \d+s ago, 1 unread$/m);
+  await Mcp.once(bCfg, "ReadNotifications");
+  assert.doesNotMatch((await a.tool("ListAgents")).text, /unread/);
+  await a.finish();
+});
+
 test("errors come back as tool errors, not crashes", opts, async () => {
   const a = new Mcp(session("err-a"));
   assert.deepEqual(await a.tool("SendMessage", { to: "nobody", message: "x" }), {

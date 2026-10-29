@@ -608,6 +608,25 @@ async fn a_waiting_inbox_pings_by_itself() {
 
 /// Connects as a listener, retrying while the relay still holds the name for a
 /// connection that has just closed.
+#[tokio::test]
+async fn list_shows_how_many_messages_each_agent_has_unread() {
+    let rig = Rig::new("unread", &["a", "b"]);
+    let (addr, _db, _hub) = rig.start_hub(false, UNLIMITED).await;
+    drop(rig.conn(&addr, "b", false).await);
+    let mut a = rig.conn(&addr, "a", false).await;
+    send(&mut a, "b", "x").await;
+    let last = send(&mut a, "b", "y").await["ids"][0].as_i64().unwrap();
+    let unread =
+        |r: &Value, n: &str| r["agents"].as_array().unwrap().iter().find(|x| x["name"] == n).unwrap()["unread"].clone();
+    let r = a.call(json!({"op": "list"})).await.unwrap();
+    assert_eq!((unread(&r, "a"), unread(&r, "b")), (json!(0), json!(2)));
+
+    let mut b = rig.conn(&addr, "b", false).await;
+    b.ack_sync(last).await.unwrap();
+    let r = a.call(json!({"op": "list"})).await.unwrap();
+    assert_eq!(unread(&r, "b"), json!(0), "an acked message still counted as unread");
+}
+
 async fn listen(
     addr: &str,
     name: &str,

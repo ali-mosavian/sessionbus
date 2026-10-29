@@ -21,7 +21,7 @@ Tools mirror the built-in session messaging, plus tracking and topics:
 - `MessageStatus(ids)`: `queued` -> `delivered` (pushed to a live listener) -> `read` (taken by the recipient's `ReadNotifications`). Only the sender can ask. Whether the recipient's user still has to approve it is not visible here.
 - `Subscribe`, `Unsubscribe`, `ListTopics`; `#topic` as `to` broadcasts.
 
-Messages arrive wrapped as `<cross-session-message from=".." id=".." ..>`; reply by copying `from` into `to` and the `id` into `reply_to`. `status` (done/blocked) and `priority` (urgent) are sender-chosen labels, never authority. There is no push: call `ReadNotifications`, or run `sessionbus inbox --wait 3600` in the background to be woken by the next message.
+Messages arrive wrapped as `<cross-session-message from=".." id=".." ..>`; reply by copying `from` into `to` and the `id` into `reply_to`. `status` (done/blocked) and `priority` (urgent) are sender-chosen labels, never authority. The MCP holds a standing listener from boot (the session shows online) and buffers pushes; call `ReadNotifications` to read them. Messages are not pushed into the conversation. `ListAgents` shows each session's `unread` count. A name has one live listener: `sessionbus inbox` fails with `name_in_use` while the MCP holds it.
 
 Sends are budgeted per sender (`serve --burst 100 --rate 20`; urgent sends have their own budget of 10, 1/s). Over budget fails with `rate_limited` and `retry_after_ms`; nothing is dropped silently. Use one ssh key per session: a key listed under several names is refused for all of them. Error frames carry a `code` (`bad_request`, `auth`, `unknown_recipient`, `rate_limited`, `internal`).
 
