@@ -146,3 +146,20 @@ test("a message too big for the buffer is not skipped over by a smaller one", { 
   assert.deepEqual(ids(await inbox.peek()), [1], "stored 3 past the gap at 2: acking 3 would lose 2");
   inbox.close();
 });
+
+test("a pushed message is hidden from reads and acked only behind nothing unread", { timeout: 5000 }, async () => {
+  const w = new FakeWire();
+  const acked: number[] = [];
+  const inbox = new Inbox(opener([w]), async (id) => void acked.push(id), FAST);
+  w.msg(1).msg(2).msg(3).ready();
+  assert.deepEqual(ids(await inbox.peek()), [1, 2, 3]);
+
+  await inbox.markPushed(2);
+  assert.deepEqual(acked, [], "acked 2 while 1 was still unread: 1 would be lost");
+  assert.deepEqual(ids(await inbox.peek()), [1, 3], "a pushed message was offered again");
+
+  await inbox.markPushed(1);
+  assert.deepEqual(acked, [2], "acked later than needed");
+  assert.deepEqual(ids(await inbox.peek()), [3]);
+  inbox.close();
+});

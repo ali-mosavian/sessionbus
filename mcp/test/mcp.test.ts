@@ -76,11 +76,11 @@ class Mcp {
   done: Promise<void>;
   nextId = 1;
 
-  constructor(cfg: Config, listening = false) {
+  constructor(cfg: Config, listening = false, channel: string[] = []) {
     const inbox = relayInbox(cfg);
     inboxes.push(inbox);
     if (listening) inbox.start();
-    this.done = serve({ cfg, inbox }, this.input, this.output);
+    this.done = serve({ cfg, inbox, channel: new Set(channel) }, this.input, this.output);
     this.lines = createInterface({ input: this.output })[Symbol.asyncIterator]();
   }
 
@@ -254,6 +254,36 @@ test("ListAgents shows how many messages wait for a session", opts, async () => 
   await Mcp.once(bCfg, "ReadNotifications");
   assert.doesNotMatch((await a.tool("ListAgents")).text, /unread/);
   await a.finish();
+});
+
+test("a trusted sender is pushed into the conversation, anyone else waits", opts, async () => {
+  const [bCfg, a, c] = [session("ch-b"), new Mcp(session("ch-a")), new Mcp(session("ch-c"))];
+  const b = new Mcp(bCfg, true, ["ch-a"]);
+  const init = await b.rpc("initialize", {});
+  assert.deepEqual(init.result.capabilities.experimental, { "claude/channel": {} });
+  await a.tool("SendMessage", { to: "ch-b", message: "hi" });
+  await c.tool("SendMessage", { to: "ch-b", message: "sneaky" });
+
+  const push = await b.recv();
+  assert.equal(push.method, "notifications/claude/channel");
+  assert.match(push.params.content, /from="ch-a"[^>]*>\nhi\n/);
+  assert.deepEqual(push.params.meta.from, "ch-a");
+
+  let text = "";
+  for (let i = 0; i < 50 && !text.includes("sneaky"); i++) {
+    text = (await b.tool("ReadNotifications")).text;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.match(text, /sneaky/);
+  assert.doesNotMatch(text, /\nhi\n/, "a pushed message was read again");
+  await Promise.all([a.finish(), b.finish(), c.finish()]);
+});
+
+test("channels stay off without trusted senders", opts, async () => {
+  const b = new Mcp(session("off-b"));
+  const init = await b.rpc("initialize", {});
+  assert.equal(init.result.capabilities.experimental, undefined);
+  await b.finish();
 });
 
 test("errors come back as tool errors, not crashes", opts, async () => {

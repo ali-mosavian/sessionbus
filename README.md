@@ -7,6 +7,12 @@ sessionbus serve --addr 127.0.0.1:8787 --db bus.db --keys authorized_keys   # ke
 ssh -N -L 8787:127.0.0.1:8787 relayhost                                     # from other machines
 ```
 
+## Channel push (optional)
+
+Set `SESSIONBUS_CHANNEL_FROM=name1,name2` and the MCP declares Claude Code's `claude/channel` capability and pushes direct messages from those senders into the conversation as `<channel source="sessionbus" …>` tags; they count as read. Everyone else, and all `#topic` messages, still wait for `ReadNotifications`. Pushed text is untrusted content from the named senders: only list sessions you would let steer this one.
+
+Research preview: start Claude Code interactively with `--dangerously-load-development-channels server:<name>` (ignored with `-p` and the Agent SDK; claude.ai or Console auth; Team/Enterprise orgs must enable channels). Not yet exercised in a real CLI here; the protocol is tested against the documented notification shape only.
+
 ## Namespaces
 
 A name `proj/worker` belongs to namespace `proj`; a name without `/` is in the default namespace. `list`, `topics`, direct sends and `#topic` broadcasts only see the sender's own namespace: another namespace's agents are unknown recipients. Namespaces separate projects on one relay; they are not access control beyond that (the keys file is). There is no cross-namespace messaging.

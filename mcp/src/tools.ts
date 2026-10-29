@@ -10,6 +10,8 @@ export type Args = Record<string, any>;
 export interface Ctx {
   cfg: Config;
   inbox: Inbox;
+  /** Senders whose messages are pushed into the conversation (Claude Code channels); empty or absent: none. */
+  channel?: Set<string>;
 }
 /** `after` runs once the reply was written or failed; `delivered` says which. */
 export type ToolResult = { text: string; after?: (delivered: boolean) => Promise<void> };

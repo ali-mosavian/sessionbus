@@ -48,6 +48,9 @@ export class Inbox {
   private lastError?: Error;
   private closed = false;
   private started = false;
+  /** Pushed into the conversation already: hidden from `peek`, acked once nothing unpushed precedes them. */
+  private pushed = new Set<number>();
+  private onStore?: (m: Frame) => void;
   private waiters: Array<() => void> = [];
   private wake?: () => void;
 
@@ -64,12 +67,27 @@ export class Inbox {
     void this.run();
   }
 
+  /** Calls `fn` for each message already held and unpushed, then for each one stored later. */
+  onMessage(fn: (m: Frame) => void): void {
+    this.onStore = fn;
+    [...this.buf.values()].filter((m) => !this.pushed.has(m.id)).sort((a, b) => a.id - b.id).forEach(fn);
+  }
+
   /** The unread messages, oldest first. Nothing is removed: call `commit` once Claude has them. */
   async peek(): Promise<Frame[]> {
     this.start();
     if (!this.buf.size && !this.ready) await this.untilReady();
     if (!this.buf.size && !this.ready) throw this.lastError ?? new Error("not connected to the relay");
     return [...this.buf.values()].sort((a, b) => a.id - b.id);
+  }
+
+  /** `id` reached Claude by push. The relay is told once no unread message precedes it. */
+  async markPushed(id: number): Promise<void> {
+    this.pushed.add(id);
+    const ids = [...this.buf.keys()].sort((a, b) => a - b);
+    const firstUnpushed = ids.find((i) => !this.pushed.has(i));
+    const covered = ids.filter((i) => firstUnpushed === undefined || i < firstUnpushed);
+    if (covered.length) await this.commit(covered[covered.length - 1]!);
   }
 
   /** Claude has everything up to `last`: ack it on the relay, then forget it here. */
@@ -79,6 +97,7 @@ export class Inbox {
       if (id > last) continue;
       this.bytes -= size(m);
       this.buf.delete(id);
+      this.pushed.delete(id);
     }
     this.watermark = Math.max(this.watermark, last);
     if (this.overflowed) {
@@ -102,6 +121,7 @@ export class Inbox {
     }
     this.buf.set(m.id, m);
     this.bytes += size(m);
+    this.onStore?.(m);
   }
 
   private async run(): Promise<void> {
