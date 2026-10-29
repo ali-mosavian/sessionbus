@@ -78,7 +78,7 @@ export class Inbox {
     this.start();
     if (!this.buf.size && !this.ready) await this.untilReady();
     if (!this.buf.size && !this.ready) throw this.lastError ?? new Error("not connected to the relay");
-    return [...this.buf.values()].sort((a, b) => a.id - b.id);
+    return [...this.buf.values()].filter((m) => !this.pushed.has(m.id)).sort((a, b) => a.id - b.id);
   }
 
   /** `id` reached Claude by push. The relay is told once no unread message precedes it. */

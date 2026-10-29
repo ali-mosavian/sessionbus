@@ -19,7 +19,7 @@ use tokio::{
     time::{Instant, MissedTickBehavior, interval, timeout, timeout_at},
 };
 
-pub use self::auth::{NAMESPACE, signed_payload};
+pub use self::auth::{NAMESPACE, check_keys_perms, signed_payload};
 use self::{
     proto::{Req, err_frame, msg_frame, put},
     state::{DEFAULT_LIMIT, Ledger, Listeners, RateLimit},

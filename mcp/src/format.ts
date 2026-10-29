@@ -6,10 +6,11 @@ export const TAG = "cross-session-message";
 /** Marks a message as coming over the relay, not from the built-in session messaging that uses the same tag. */
 export const VIA = "sessionbus";
 
-const esc = (s: string) => s.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;");
+const esc = (s: string) =>
+  s.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replace(/\s*\n\s*/g, " ");
 
-/** A body must not be able to close its wrapper or open a forged one. */
-const neutralize = (body: string) => body.replace(new RegExp(`<(/?${TAG})`, "gi"), "&lt;$1");
+/** A body is prose: no `<` survives, so it cannot close its wrapper or open any tag, ours or the harness's. */
+const neutralize = (body: string) => body.replaceAll("<", "&lt;");
 
 const attr = (name: string, value: unknown) => (value == null ? "" : ` ${name}="${esc(String(value))}"`);
 

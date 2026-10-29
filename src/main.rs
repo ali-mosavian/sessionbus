@@ -42,6 +42,7 @@ async fn main() {
         let addr = opt(&mut args, "--addr").unwrap_or("127.0.0.1:8787".into());
         let db = opt(&mut args, "--db").unwrap_or("sessionbus.db".into());
         let keys = opt(&mut args, "--keys").unwrap_or("authorized_keys".into());
+        sessionbus::server::check_keys_perms(keys.as_ref()).unwrap_or_else(|e| die(e));
         let db = Db::open(db.as_ref()).unwrap_or_else(|e| die(e));
         let l = TcpListener::bind(&addr).await.unwrap_or_else(|e| die(format!("{addr}: {e}")));
         let num =

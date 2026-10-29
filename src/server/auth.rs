@@ -54,9 +54,44 @@ pub fn verify(
         .any(|(_, k)| k.verify(NAMESPACE, &msg, &sig).is_ok())
 }
 
+/// A keys file others can write is account takeover: refuse to serve with one.
+#[cfg(unix)]
+pub fn check_keys_perms(keys: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(keys).map_err(|e| format!("{}: {e}", keys.display()))?.permissions().mode();
+    if mode & 0o022 != 0 {
+        return Err(format!("{}: writable by group or others (mode {:o}); chmod go-w", keys.display(), mode & 0o777));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn check_keys_perms(_: &Path) -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::valid_name;
+    use super::{check_keys_perms, valid_name};
+
+    #[cfg(unix)]
+    #[test]
+    fn a_keys_file_others_can_write_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = std::env::temp_dir().join(format!("sessionbus-perms-{}", std::process::id()));
+        std::fs::write(&f, "").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(check_keys_perms(&f).is_ok());
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o664)).unwrap();
+        assert!(check_keys_perms(&f).is_err(), "a group-writable keys file was accepted");
+        std::fs::remove_file(&f).unwrap();
+    }
+
+    #[test]
+    fn only_the_first_segment_is_the_namespace() {
+        assert_eq!(crate::db::namespace("a/b/c"), "a");
+        assert_eq!(crate::db::namespace("w1"), "");
+    }
 
     #[test]
     fn a_namespace_needs_a_name_on_both_sides_of_the_slash() {
