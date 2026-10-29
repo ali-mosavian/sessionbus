@@ -1,0 +1,14 @@
+[package]
+name = "sessionbus"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
+ssh-key = { version = "0.6.7", features = ["ed25519", "rand_core", "std"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time"] }
+
+[dev-dependencies]
+ssh-key = { version = "0.6.7", features = ["getrandom", "ed25519"] }
