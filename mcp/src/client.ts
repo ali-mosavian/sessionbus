@@ -9,24 +9,17 @@ import { loadKey, sshSign } from "./ssh.ts";
 
 export interface Config {
   addr: string;
-  /** The relay name, `project/name`. */
+  /** This session's name inside a project: on the relay it is `project/name`. */
   name?: string;
   keyPath: string;
-  /** Why this session cannot join the relay, in words for the user. */
-  problem?: string;
 }
 
 export function configFromEnv(env: NodeJS.ProcessEnv = process.env): Config {
-  const base = {
+  return {
     addr: env.SESSIONBUS_ADDR ?? "127.0.0.1:8787",
+    name: env.SESSIONBUS_NAME,
     keyPath: env.SESSIONBUS_KEY ?? join(homedir(), ".ssh", "id_ed25519"),
   };
-  const [project, name] = [env.SESSIONBUS_PROJECT, env.SESSIONBUS_NAME];
-  if (!project)
-    return { ...base, problem: "SESSIONBUS_PROJECT not set: set it to the project this session belongs to (e.g. llrm); sessions only see others in the same project" };
-  if (!name) return { ...base, problem: "SESSIONBUS_NAME not set" };
-  if (`${project}${name}`.includes("/")) return { ...base, problem: "SESSIONBUS_PROJECT and SESSIONBUS_NAME must not contain '/'" };
-  return { ...base, name: `${project}/${name}` };
 }
 
 export type Frame = { op: string; [k: string]: any };
@@ -58,7 +51,6 @@ export class Conn {
 
   /** Connects and authenticates. `listen` connections also receive queued messages. */
   static async open(cfg: Config, listen: boolean): Promise<Conn> {
-    if (cfg.problem) throw new Error(cfg.problem);
     if (!cfg.name) throw new Error("SESSIONBUS_NAME not set");
     const key = loadKey(cfg.keyPath);
     const i = cfg.addr.lastIndexOf(":");

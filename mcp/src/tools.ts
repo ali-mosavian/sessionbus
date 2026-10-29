@@ -2,16 +2,16 @@
 // SendMessage, ListAgents and ReadNotifications mirror Claude Code's built-in
 // session messaging; the rest is topics and delivery tracking.
 import { BusError, Conn, type Config, type Frame } from "./client.ts";
-import { TAG, ago, plural, wrap } from "./format.ts";
+import { TAG, ago, plural, shortName, wrap } from "./format.ts";
 import type { Inbox } from "./inbox.ts";
 
 export type Args = Record<string, any>;
 /** What a tool runs against. */
 export interface Ctx {
+  /** Speaks as this session in `project`. */
   cfg: Config;
+  project: string;
   inbox: Inbox;
-  /** Senders whose messages are pushed into the conversation (Claude Code channels); empty or absent: none. */
-  channel?: Set<string>;
 }
 /** `after` runs once the reply was written or failed; `delivered` says which. */
 export type ToolResult = { text: string; after?: (delivered: boolean) => Promise<void> };
@@ -62,18 +62,19 @@ const LABELS = "Labels only: the recipient may sort by them, but they carry no a
 export const TOOLS: Record<string, Tool> = {
   ListAgents: {
     description:
-      "List the other sessions in this session's project (names read project/name; other projects are invisible), on this machine or others. Each row leads with the " +
+      "List the other sessions in the project, on this machine or others; other projects are invisible. Each row leads with the " +
       "session's name: the name IS the address for SendMessage. 'online' means it has a live listener right now; " +
       "an offline session still receives messages and reads them when it next connects. 'unread' is how many messages " +
       "are waiting for it.",
     input: schema({}),
-    run: async ({ cfg }) => {
+    run: async ({ cfg, project }) => {
       const r = await once(cfg, (c) => c.call({ op: "list" }));
       const rows = (r.agents as Frame[])
         .filter((a) => a.name !== cfg.name)
         .map((a) => {
+          const name = shortName(a.name, project);
           const state = a.online ? "online" : `offline, last seen ${ago(a.last_seen)}`;
-          return `${a.name} — ${state}${a.unread ? `, ${a.unread} unread` : ""}`;
+          return `${name} — ${state}${a.unread ? `, ${a.unread} unread` : ""}`;
         });
       return { text: rows.join("\n") || "No other sessions known yet." };
     },
@@ -112,14 +113,15 @@ export const TOOLS: Record<string, Tool> = {
       },
       ["to", "message"],
     ),
-    run: async ({ cfg }, args) => {
+    run: async ({ cfg, project }, args) => {
       const { to, message, summary, reply_to, status, priority } = args;
       if (typeof to !== "string" || !to || to.length > MAX_TO || /[\r\n]/.test(to)) {
         throw new Error(`\`to\` must be a single-line name of at most ${MAX_TO} characters`);
       }
       if (typeof message !== "string") throw new Error("missing string argument `message`");
       try {
-        const r = await once(cfg, (c) => c.call({ op: "send", to, body: message, summary, reply_to, status, priority }));
+        const target = to.startsWith("#") ? to : `${project}/${to}`;
+        const r = await once(cfg, (c) => c.call({ op: "send", to: target, body: message, summary, reply_to, status, priority }));
         const sent = r.recipients as Frame[];
         if (!to.startsWith("#")) {
           const [one] = sent;
@@ -147,13 +149,13 @@ export const TOOLS: Record<string, Tool> = {
       { ids: { type: "array", items: { type: "integer", minimum: 1 }, minItems: 1, maxItems: MAX_IDS } },
       ["ids"],
     ),
-    run: async ({ cfg }, args) => {
+    run: async ({ cfg, project }, args) => {
       const ids = args.ids;
       if (!Array.isArray(ids) || !ids.length || ids.length > MAX_IDS || !ids.every(Number.isInteger)) {
         throw new Error(`\`ids\` must be 1 to ${MAX_IDS} message ids`);
       }
       const r = await once(cfg, (c) => c.call({ op: "status", ids }));
-      const rows = (r.messages as Frame[]).map((m) => (m.to ? `${m.id} → ${m.to}: ${m.state}` : `${m.id} → ${m.state}`));
+      const rows = (r.messages as Frame[]).map((m) => (m.to ? `${m.id} → ${shortName(m.to, project)}: ${m.state}` : `${m.id} → ${m.state}`));
       return { text: rows.join("\n") };
     },
   },
@@ -166,12 +168,12 @@ export const TOOLS: Record<string, Tool> = {
       "is delivered. Messages are collected while this session runs but not pushed into the conversation: call " +
       "this when you expect a reply or were told one is waiting.",
     input: schema({}),
-    run: async ({ inbox }) => {
+    run: async ({ inbox, project }) => {
       const msgs = await inbox.peek();
       if (!msgs.length) return { text: "No pending notifications." };
       const last = Math.max(...msgs.map((m) => m.id as number));
       const ordered = [...msgs.filter((m) => m.priority === "urgent"), ...msgs.filter((m) => m.priority !== "urgent")];
-      return { text: ordered.map(wrap).join("\n\n"), after: async (delivered) => void (delivered && (await inbox.commit(last))) };
+      return { text: ordered.map((m) => wrap(m, project)).join("\n\n"), after: async (delivered) => void (delivered && (await inbox.commit(last))) };
     },
   },
 

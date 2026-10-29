@@ -15,7 +15,7 @@ Or download `sessionbus-<target>.tar.gz` and `SHA256SUMS` from the [latest relea
 MCP for Claude Code (Node >= 22.18, nothing to build):
 
 ```sh
-claude mcp add sessionbus -e SESSIONBUS_PROJECT=llrm -e SESSIONBUS_NAME=me -e SESSIONBUS_ADDR=127.0.0.1:8787 -- \
+claude mcp add sessionbus -e SESSIONBUS_NAME=me -e SESSIONBUS_PROJECTS=llrm -e SESSIONBUS_ADDR=127.0.0.1:8787 -- \
   npx -y https://github.com/ali-mosavian/sessionbus/releases/latest/download/sessionbus-mcp.tgz
 ```
 
@@ -34,16 +34,16 @@ Research preview: start Claude Code interactively with `--dangerously-load-devel
 
 ## Projects
 
-Sessions belong to a project; the relay name is `project/name` (the MCP joins `SESSIONBUS_PROJECT` and `SESSIONBUS_NAME`, and refuses to start without a project). `list`, `topics`, direct sends and `#topic` broadcasts only see the sender's own project: another project's sessions are unknown recipients. Projects separate work on one relay; they are not access control beyond the keys file. There is no cross-project messaging.
+Every MCP tool takes a required `project` (e.g. `llrm`). Sessions only see others in the same project: `list`, `topics`, direct sends and `#topic` broadcasts never cross it, and another project's sessions are unknown recipients. On the relay a session is `project/name`; in tool calls and messages it is just `name`, and received messages carry a `project` attribute. Projects separate work on one relay; they are not access control beyond the keys file.
 
-One key per machine is enough: list its default ssh public key as `llrm/*` and every session on that machine may sign in as any `llrm/<name>` (and nothing outside `llrm/`). A key listed under several entries is refused for all of them.
+One key per machine is enough: list its default ssh public key as `llrm/*` in `authorized_keys` and every session on that machine may sign in as any `llrm/<name>` (and nothing outside `llrm/`). A key listed under several entries is refused for all of them.
 
 ## Claude Code
 
 Needs Node >= 22.18 (runs the TypeScript directly, no build, no dependencies).
 
 ```sh
-claude mcp add sessionbus -e SESSIONBUS_PROJECT=<project> -e SESSIONBUS_NAME=<this-session> -- node /path/to/sessionbus/mcp/src/index.ts
+claude mcp add sessionbus -e SESSIONBUS_NAME=<this-session> -e SESSIONBUS_PROJECTS=<project> -- node /path/to/sessionbus/mcp/src/index.ts
 ```
 
 Tools mirror the built-in session messaging, plus tracking and topics:
@@ -56,7 +56,7 @@ Messages arrive wrapped as `<cross-session-message from=".." id=".." ..>`; reply
 
 Sends are budgeted per sender (`serve --burst 100 --rate 20`; urgent sends have their own budget of 10, 1/s). Over budget fails with `rate_limited` and `retry_after_ms`; nothing is dropped silently. Use one ssh key per session: a key listed under several names is refused for all of them. Error frames carry a `code` (`bad_request`, `auth`, `unknown_recipient`, `rate_limited`, `internal`).
 
-Env: `SESSIONBUS_PROJECT` (required), `SESSIONBUS_NAME` (short name; the relay name is `project/name`), `SESSIONBUS_ADDR` (default `127.0.0.1:8787`), `SESSIONBUS_KEY` (default `~/.ssh/id_ed25519`, unencrypted ed25519).
+Env: `SESSIONBUS_NAME` (this session's name within a project), `SESSIONBUS_PROJECTS` (comma-separated projects to be online in from boot; others are joined on first `ReadNotifications`), `SESSIONBUS_ADDR` (default `127.0.0.1:8787`), `SESSIONBUS_KEY` (default `~/.ssh/id_ed25519`, unencrypted ed25519).
 
 Tests (need the relay built): `cargo build && cd mcp && npm install && npm test`.
 

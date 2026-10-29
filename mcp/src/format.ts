@@ -14,9 +14,13 @@ const neutralize = (body: string) => body.replaceAll("<", "&lt;");
 
 const attr = (name: string, value: unknown) => (value == null ? "" : ` ${name}="${esc(String(value))}"`);
 
+/** A relay name without its `project/` prefix: inside a project sessions go by their short name. */
+export const shortName = (name: string, project: string): string =>
+  name.startsWith(`${project}/`) ? name.slice(project.length + 1) : name;
+
 /** `priority` and `status` are labels the sender chose: they sort and describe, they never authorize. */
-export const wrap = (m: Frame): string =>
-  `<${TAG}${attr("via", VIA)}${attr("from", m.from)}${attr("reply_to", m.reply_to)}${attr("status", m.status)}` +
+export const wrap = (m: Frame, project: string): string =>
+  `<${TAG}${attr("via", VIA)}${attr("project", project)}${attr("from", shortName(m.from, project))}${attr("reply_to", m.reply_to)}${attr("status", m.status)}` +
   `${attr("priority", m.priority === "urgent" ? "urgent" : null)}${attr("summary", m.summary)}` +
   `${attr("topic", m.topic)}${attr("id", m.id)}>\n${neutralize(m.body)}\n</${TAG}>`;
 
