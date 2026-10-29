@@ -4,7 +4,7 @@ use std::{
     io::{self, Read},
     path::PathBuf,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
@@ -17,7 +17,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, WriteHalf},
     net::TcpListener,
     sync::mpsc,
-    time::timeout,
+    time::{MissedTickBehavior, interval, timeout},
 };
 
 use crate::db::{self, BusErr, Db, Msg};
@@ -25,6 +25,8 @@ use crate::db::{self, BusErr, Db, Msg};
 pub const NAMESPACE: &str = "sessionbus";
 const MAX_BODY: usize = 1 << 20;
 const BATCH: i64 = 500;
+/// How long an ack may wait in memory when no send is committing.
+const ACK_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase")]
@@ -57,6 +59,9 @@ pub struct Hub {
     keys: PathBuf,
     conns: Mutex<HashMap<String, Vec<(u64, mpsc::UnboundedSender<()>)>>>,
     next: AtomicU64,
+    /// Highest acked id per session, not yet deleted. A crash loses these,
+    /// which only means redelivery.
+    acks: Mutex<HashMap<String, i64>>,
 }
 
 /// What a client signs to prove it holds the key registered for `name`.
@@ -72,7 +77,39 @@ impl Hub {
         db: Db,
         authorized_keys: PathBuf,
     ) -> Arc<Hub> {
-        Arc::new(Hub { db, keys: authorized_keys, conns: Mutex::default(), next: AtomicU64::new(1) })
+        Arc::new(Hub {
+            db,
+            keys: authorized_keys,
+            conns: Mutex::default(),
+            next: AtomicU64::new(1),
+            acks: Mutex::default(),
+        })
+    }
+
+    fn hold_ack(
+        &self,
+        name: &str,
+        id: i64,
+    ) {
+        let mut m = self.acks.lock().unwrap_or_else(|p| p.into_inner());
+        let e = m.entry(name.to_string()).or_insert(id);
+        *e = (*e).max(id);
+    }
+
+    fn take_acks(&self) -> Vec<(String, i64)> {
+        self.acks.lock().unwrap_or_else(|p| p.into_inner()).drain().collect()
+    }
+
+    /// Deletes the messages acked so far, in one commit.
+    pub async fn apply_acks(&self) {
+        let acks = self.take_acks();
+        if acks.is_empty() {
+            return;
+        }
+        let a = acks.clone();
+        if self.db.run(move |c| db::apply_acks(c, &a)).await.is_err() {
+            acks.iter().for_each(|(n, id)| self.hold_ack(n, *id));
+        }
     }
 
     fn conns(&self) -> std::sync::MutexGuard<'_, HashMap<String, Vec<(u64, mpsc::UnboundedSender<()>)>>> {
@@ -137,10 +174,22 @@ async fn put<W: AsyncWrite + Unpin>(
     w.flush().await
 }
 
+/// Applies pending acks every `ACK_INTERVAL`, until the hub is dropped.
+async fn flush_acks(hub: Weak<Hub>) {
+    let mut tick = interval(ACK_INTERVAL);
+    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        tick.tick().await;
+        let Some(h) = hub.upgrade() else { return };
+        h.apply_acks().await;
+    }
+}
+
 pub async fn run(
     listener: TcpListener,
     hub: Arc<Hub>,
 ) {
+    tokio::spawn(flush_acks(Arc::downgrade(&hub)));
     loop {
         match listener.accept().await {
             Ok((sock, _)) => {
@@ -211,6 +260,8 @@ async fn session<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     let mut lines = br.lines();
     let mut cursor = 0;
     if listen {
+        // a reconnect must not see what it already acked
+        hub.apply_acks().await;
         cursor = flush(hub, name, cursor, wr).await?;
         put(wr, &json!({"op": "ready"})).await?;
     }
@@ -241,7 +292,7 @@ async fn flush<W: AsyncWrite + Unpin>(
 ) -> io::Result<i64> {
     loop {
         let n = name.to_string();
-        let msgs: Vec<Msg> = match hub.db.run(move |c| db::pending(c, &n, cursor, BATCH)).await {
+        let msgs: Vec<Msg> = match hub.db.read(move |c| db::pending(c, &n, cursor, BATCH)).await {
             Ok(m) => m,
             Err(e) => {
                 put(wr, &err(e)).await?;
@@ -277,7 +328,7 @@ async fn request(
         Ok(match r {
             Req::Hello { .. } => return Err(BusErr::new("already authenticated")),
             Req::List => {
-                let rows = hub.db.run(|c| db::agents(c)).await?;
+                let rows = hub.db.read(|c| db::agents(c)).await?;
                 let agents: Vec<Value> = rows
                     .into_iter()
                     .map(|(n, t)| json!({"name": n, "online": hub.online(&n), "last_seen": t}))
@@ -285,7 +336,7 @@ async fn request(
                 json!({"op": "agents", "agents": agents})
             }
             Req::Topics => {
-                let rows = hub.db.run(|c| db::topics(c)).await?;
+                let rows = hub.db.read(|c| db::topics(c)).await?;
                 let t: Vec<Value> = rows.into_iter().map(|(t, n)| json!({"topic": t, "subscribers": n})).collect();
                 json!({"op": "topics", "topics": t})
             }
@@ -303,14 +354,23 @@ async fn request(
                 if to.is_empty() || body.is_empty() || body.len() > MAX_BODY {
                     return Err(BusErr::new("need to and a body of 1..1MiB"));
                 }
-                let recips = hub.db.run(move |c| db::enqueue(c, &me, &to, &body)).await?;
+                let acks = hub.take_acks();
+                let a = acks.clone();
+                let sent = hub.db.run(move |c| db::enqueue(c, &me, &to, &body, &a)).await;
+                let recips = match sent {
+                    Ok(sent) => sent?,
+                    Err(e) => {
+                        acks.iter().for_each(|(n, id)| hub.hold_ack(n, *id));
+                        return Err(e);
+                    }
+                };
                 for r in &recips {
                     hub.notify(r);
                 }
                 json!({"op": "sent", "delivered": recips.len()})
             }
             Req::Ack { id } => {
-                hub.db.run(move |c| db::ack(c, &me, id)).await?;
+                hub.hold_ack(&me, id);
                 return Ok(Value::Null);
             }
         })

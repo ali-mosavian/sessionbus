@@ -1,10 +1,10 @@
-use std::{collections::HashMap, path::PathBuf, time::Duration};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use serde_json::{Value, json};
 use sessionbus::{
     client::Client,
-    db::Db,
-    server::{Hub, run},
+    db::{self, Db},
+    server::{Hub, run, serve_conn},
 };
 use ssh_key::{Algorithm, PrivateKey, rand_core::OsRng};
 use tokio::{net::TcpListener, task::JoinHandle, time::timeout};
@@ -39,6 +39,30 @@ impl Rig {
         let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap().to_string();
         (addr, tokio::spawn(run(l, hub)))
+    }
+
+    /// Like `start`, but hands back the db and hub for white-box checks. With
+    /// `timer` false nothing applies acks behind the test's back.
+    async fn start_hub(
+        &self,
+        timer: bool,
+    ) -> (String, Db, Arc<Hub>) {
+        let db = Db::open(&self.dir.join("bus.db")).unwrap();
+        let hub = Hub::new(db.clone(), self.dir.join("authorized_keys"));
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        let h = hub.clone();
+        if timer {
+            tokio::spawn(run(l, h));
+        } else {
+            tokio::spawn(async move {
+                loop {
+                    let (s, _) = l.accept().await.unwrap();
+                    tokio::spawn(serve_conn(h.clone(), s));
+                }
+            });
+        }
+        (addr, db, hub)
     }
 
     async fn conn(
@@ -180,4 +204,103 @@ async fn queued_messages_survive_a_relay_restart() {
     let (addr2, _s2) = rig.start().await;
     let mut b = Client::connect(&addr2, "b", &rig.keys["b"], true).await.unwrap();
     assert_eq!(msg(&mut b).await["body"], "persist me");
+}
+
+async fn queued(
+    db: &Db,
+    to: &str,
+) -> usize {
+    let to = to.to_string();
+    db.run(move |c| db::pending(c, &to, 0, 1000)).await.unwrap().len()
+}
+
+/// Every ack was its own synchronous=FULL commit, so N deliveries cost N
+/// fsyncs: on NVMe 763 deliveries/s and send p99 of 1.9s.
+#[tokio::test]
+async fn deliveries_do_not_cost_a_commit_each() {
+    const N: usize = 200;
+    let rig = Rig::new("ackcost", &["a", "b"]);
+    let (addr, db, hub) = rig.start_hub(false).await;
+    drop(rig.conn(&addr, "b", false).await);
+    let mut a = rig.conn(&addr, "a", false).await;
+    for i in 0..N {
+        send(&mut a, "b", &format!("m{i}")).await;
+    }
+
+    let before = db.commits();
+    let mut b = Client::connect(&addr, "b", &rig.keys["b"], true).await.unwrap();
+    let mut last = 0;
+    for _ in 0..N {
+        last = msg(&mut b).await["id"].as_i64().unwrap();
+        b.ack(last).await.unwrap();
+    }
+    b.ack_sync(last).await.unwrap();
+    hub.apply_acks().await;
+    let spent = db.commits() - before;
+    assert!(spent <= 5, "{N} acked deliveries cost {spent} commits");
+    assert_eq!(queued(&db, "b").await, 0);
+    drop(b);
+
+    let mut b2 = Client::connect(&addr, "b", &rig.keys["b"], true).await.unwrap();
+    assert_eq!(b2.next().await.unwrap().unwrap()["op"], "ready", "acked messages were redelivered");
+}
+
+/// Acks are held in memory, so nothing but a timer applies them when no send
+/// follows; without it acked messages would sit in the db until a reconnect.
+#[tokio::test]
+async fn acks_are_applied_without_any_further_send() {
+    let rig = Rig::new("acktimer", &["a", "b"]);
+    let (addr, db, _hub) = rig.start_hub(true).await;
+    drop(rig.conn(&addr, "b", false).await);
+    let mut a = rig.conn(&addr, "a", false).await;
+    send(&mut a, "b", "x").await;
+
+    let mut b = Client::connect(&addr, "b", &rig.keys["b"], true).await.unwrap();
+    let id = msg(&mut b).await["id"].as_i64().unwrap();
+    b.ack_sync(id).await.unwrap();
+    for _ in 0..60 {
+        if queued(&db, "b").await == 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("acked message still queued after 3s");
+}
+
+/// A failed send rolls back its own work, but must not take the acks that were
+/// pending with it.
+#[tokio::test]
+async fn failed_send_keeps_pending_acks() {
+    let rig = Rig::new("ackfail", &["a", "b"]);
+    let (addr, db, hub) = rig.start_hub(false).await;
+    drop(rig.conn(&addr, "b", false).await);
+    let mut a = rig.conn(&addr, "a", false).await;
+    send(&mut a, "b", "x").await;
+    let mut b = Client::connect(&addr, "b", &rig.keys["b"], true).await.unwrap();
+    let id = msg(&mut b).await["id"].as_i64().unwrap();
+    b.ack_sync(id).await.unwrap();
+
+    let e = a.call(json!({"op": "send", "to": "nobody", "body": "x"})).await.unwrap_err();
+    assert_eq!(e, "unknown recipient");
+    hub.apply_acks().await;
+    assert_eq!(queued(&db, "b").await, 0, "ack was lost with the failed send");
+}
+
+/// Pending acks ride along with the next send's commit instead of costing one.
+#[tokio::test]
+async fn successful_send_applies_pending_acks() {
+    let rig = Rig::new("acksend", &["a", "b", "c"]);
+    let (addr, db, _hub) = rig.start_hub(false).await;
+    drop(rig.conn(&addr, "b", false).await);
+    drop(rig.conn(&addr, "c", false).await);
+    let mut a = rig.conn(&addr, "a", false).await;
+    send(&mut a, "b", "x").await;
+    let mut b = Client::connect(&addr, "b", &rig.keys["b"], true).await.unwrap();
+    let id = msg(&mut b).await["id"].as_i64().unwrap();
+    b.ack_sync(id).await.unwrap();
+
+    let before = db.commits();
+    send(&mut a, "c", "y").await;
+    assert_eq!(queued(&db, "b").await, 0, "send did not apply the pending ack");
+    assert_eq!(db.commits() - before, 1);
 }
