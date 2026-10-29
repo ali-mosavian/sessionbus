@@ -1,6 +1,6 @@
 {
   "name": "sessionbus-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP server exposing a sessionbus relay as session-messaging tools",
   "type": "module",
   "bin": {
