@@ -12,14 +12,30 @@ use std::{
 };
 
 use rusqlite::{Connection, OpenFlags, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
+use crate::lock;
+
+/// An error with a machine-readable `code` (bad_request, auth,
+/// unknown_recipient, rate_limited, internal) and a message for people.
 #[derive(Debug)]
-pub struct BusErr(pub String);
+pub struct BusErr {
+    pub code: &'static str,
+    pub msg: String,
+    /// For rate_limited: when a retry can succeed.
+    pub retry_ms: Option<u64>,
+}
 
 impl BusErr {
-    pub fn new(s: &str) -> Self {
-        BusErr(s.into())
+    pub fn new(
+        code: &'static str,
+        msg: impl Into<String>,
+    ) -> Self {
+        BusErr { code, msg: msg.into(), retry_ms: None }
+    }
+
+    pub fn bad_request(msg: impl Into<String>) -> Self {
+        BusErr::new("bad_request", msg)
     }
 }
 
@@ -28,13 +44,13 @@ impl fmt::Display for BusErr {
         &self,
         f: &mut fmt::Formatter,
     ) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.msg)
     }
 }
 
 impl<E: std::error::Error> From<E> for BusErr {
     fn from(e: E) -> Self {
-        BusErr(e.to_string())
+        BusErr::new("internal", e.to_string())
     }
 }
 
@@ -52,6 +68,68 @@ pub struct Msg {
     pub topic: Option<String>,
     pub body: String,
     pub at: i64,
+    pub reply_to: Option<i64>,
+    pub status: Option<String>,
+    pub priority: String,
+    pub summary: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Status {
+    Done,
+    Blocked,
+}
+
+impl Status {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Status::Done => "done",
+            Status::Blocked => "blocked",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Priority {
+    Normal,
+    Urgent,
+}
+
+impl Priority {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Priority::Normal => "normal",
+            Priority::Urgent => "urgent",
+        }
+    }
+}
+
+const MAX_SUMMARY: usize = 200;
+
+/// Optional fields of a send. They are labels set by the sender and carry no
+/// authority.
+#[derive(Clone, Default, Debug, Deserialize)]
+pub struct Meta {
+    pub reply_to: Option<i64>,
+    pub status: Option<Status>,
+    pub priority: Option<Priority>,
+    pub summary: Option<String>,
+}
+
+impl Meta {
+    /// Checks what the types cannot, and drops a redundant `normal` priority.
+    pub fn validate(&mut self) -> Res<()> {
+        if self.reply_to.is_some_and(|r| r < 1) {
+            return Err(BusErr::bad_request("reply_to must be a message id"));
+        }
+        if self.summary.as_deref().is_some_and(|s| s.len() > MAX_SUMMARY || s.contains(['\n', '\r'])) {
+            return Err(BusErr::bad_request("summary must be one line of at most 200 bytes"));
+        }
+        self.priority = self.priority.filter(|p| *p == Priority::Urgent);
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -70,8 +148,13 @@ impl Db {
              CREATE TABLE IF NOT EXISTS subs(topic TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY(topic, name));
              CREATE TABLE IF NOT EXISTS messages(
                  id INTEGER PRIMARY KEY AUTOINCREMENT, from_name TEXT NOT NULL, to_name TEXT NOT NULL,
-                 topic TEXT, body TEXT NOT NULL, at INTEGER NOT NULL);
-             CREATE INDEX IF NOT EXISTS messages_to ON messages(to_name, id);",
+                 topic TEXT, body TEXT NOT NULL, at INTEGER NOT NULL,
+                 reply_to INTEGER, status TEXT, priority TEXT, summary TEXT, read_at INTEGER);",
+        )?;
+        migrate(&c)?;
+        c.execute_batch(
+            "CREATE INDEX IF NOT EXISTS messages_unread ON messages(to_name, id) WHERE read_at IS NULL;
+             DROP INDEX IF EXISTS messages_to;",
         )?;
         let commits = Arc::new(AtomicU64::new(0));
         let n = commits.clone();
@@ -96,7 +179,7 @@ impl Db {
         f: impl FnOnce(&mut Connection) -> Res<T> + Send + 'static,
     ) -> Res<T> {
         let db = self.w.clone();
-        tokio::task::spawn_blocking(move || f(&mut db.lock().unwrap_or_else(|p| p.into_inner()))).await?
+        tokio::task::spawn_blocking(move || f(&mut lock(&db))).await?
     }
 
     /// Runs a read on the read-only connection: it does not wait for writers.
@@ -105,8 +188,24 @@ impl Db {
         f: impl FnOnce(&Connection) -> Res<T> + Send + 'static,
     ) -> Res<T> {
         let db = self.r.clone();
-        tokio::task::spawn_blocking(move || f(&db.lock().unwrap_or_else(|p| p.into_inner()))).await?
+        tokio::task::spawn_blocking(move || f(&lock(&db))).await?
     }
+}
+
+/// Adds the columns databases from before delivery tracking lack.
+fn migrate(c: &Connection) -> Res<()> {
+    let have: Vec<String> = c
+        .prepare("SELECT name FROM pragma_table_info('messages')")?
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    for (col, ty) in
+        [("reply_to", "INTEGER"), ("status", "TEXT"), ("priority", "TEXT"), ("summary", "TEXT"), ("read_at", "INTEGER")]
+    {
+        if !have.iter().any(|h| h == col) {
+            c.execute_batch(&format!("ALTER TABLE messages ADD COLUMN {col} {ty}"))?;
+        }
+    }
+    Ok(())
 }
 
 pub fn touch(
@@ -150,30 +249,19 @@ pub fn topics(c: &Connection) -> Res<Vec<(String, i64)>> {
 
 /// Applies `acks` (name, highest acked id) and then queues `body` for
 /// `target`, an agent name or `#topic` for every subscriber except the sender,
-/// in one commit. The outer error means nothing was committed; an inner error
-/// is a refused send that still committed the acks.
+/// in one commit. Returns each recipient with the id of its copy. A refused
+/// send rolls the acks back too; the caller still holds them.
 pub fn enqueue(
     c: &mut Connection,
     from: &str,
     target: &str,
     body: &str,
+    meta: &Meta,
     acks: &[(String, i64)],
-) -> Res<Res<Vec<String>>> {
-    let mut tx = c.transaction()?;
-    for (name, upto) in acks {
-        ack(&tx, name, *upto)?;
-    }
-    let sent = {
-        let sp = tx.savepoint()?;
-        match queue(&sp, from, target, body) {
-            Ok(recips) => {
-                sp.commit()?;
-                Ok(recips)
-            }
-            // dropping `sp` rolls back the inserts, not the acks
-            Err(e) => Err(e),
-        }
-    };
+) -> Res<Vec<(String, i64)>> {
+    let tx = c.transaction()?;
+    ack_all(&tx, acks)?;
+    let sent = queue(&tx, from, target, body, meta)?;
     tx.commit()?;
     Ok(sent)
 }
@@ -183,7 +271,8 @@ fn queue(
     from: &str,
     target: &str,
     body: &str,
-) -> Res<Vec<String>> {
+    meta: &Meta,
+) -> Res<Vec<(String, i64)>> {
     let (topic, recips): (Option<&str>, Vec<String>) = match target.strip_prefix('#') {
         Some(t) => {
             let mut s = c.prepare("SELECT name FROM subs WHERE topic=?1 AND name<>?2 ORDER BY name")?;
@@ -194,18 +283,31 @@ fn queue(
             let known: bool =
                 c.query_row("SELECT EXISTS(SELECT 1 FROM agents WHERE name=?1)", [target], |r| r.get(0))?;
             if !known {
-                return Err(BusErr::new("unknown recipient"));
+                return Err(BusErr::new("unknown_recipient", "unknown recipient"));
             }
             (None, vec![target.to_string()])
         }
     };
-    for r in &recips {
+    let mut sent = Vec::with_capacity(recips.len());
+    for r in recips {
         c.execute(
-            "INSERT INTO messages(from_name, to_name, topic, body, at) VALUES(?1, ?2, ?3, ?4, ?5)",
-            params![from, r, topic, body, now()],
+            "INSERT INTO messages(from_name, to_name, topic, body, at, reply_to, status, priority, summary)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                from,
+                r,
+                topic,
+                body,
+                now(),
+                meta.reply_to,
+                meta.status.map(Status::as_str),
+                meta.priority.map(Priority::as_str),
+                meta.summary
+            ],
         )?;
+        sent.push((r, c.last_insert_rowid()));
     }
-    Ok(recips)
+    Ok(sent)
 }
 
 pub fn pending(
@@ -215,22 +317,59 @@ pub fn pending(
     limit: i64,
 ) -> Res<Vec<Msg>> {
     let mut s = c.prepare(
-        "SELECT id, from_name, to_name, topic, body, at FROM messages
-         WHERE to_name=?1 AND id>?2 ORDER BY id LIMIT ?3",
+        "SELECT id, from_name, to_name, topic, body, at, reply_to, status, COALESCE(priority, 'normal'), summary
+         FROM messages WHERE to_name=?1 AND id>?2 AND read_at IS NULL ORDER BY id LIMIT ?3",
     )?;
     let rows = s.query_map(params![name, after, limit], |r| {
-        Ok(Msg { id: r.get(0)?, from: r.get(1)?, to: r.get(2)?, topic: r.get(3)?, body: r.get(4)?, at: r.get(5)? })
+        Ok(Msg {
+            id: r.get(0)?,
+            from: r.get(1)?,
+            to: r.get(2)?,
+            topic: r.get(3)?,
+            body: r.get(4)?,
+            at: r.get(5)?,
+            reply_to: r.get(6)?,
+            status: r.get(7)?,
+            priority: r.get(8)?,
+            summary: r.get(9)?,
+        })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
+/// Marks everything up to `upto` read. The row stays, without its content, so
+/// the sender can still ask what became of it.
 pub fn ack(
     c: &Connection,
     name: &str,
     upto: i64,
 ) -> Res<()> {
-    c.execute("DELETE FROM messages WHERE to_name=?1 AND id<=?2", params![name, upto])?;
+    c.execute(
+        "UPDATE messages SET read_at=?3, body='', summary=NULL WHERE to_name=?1 AND id<=?2 AND read_at IS NULL",
+        params![name, upto, now()],
+    )?;
     Ok(())
+}
+
+/// For each of `from`'s messages among `ids`: (id, recipient, read_at).
+pub fn statuses(
+    c: &Connection,
+    from: &str,
+    ids: &[i64],
+) -> Res<Vec<(i64, String, Option<i64>)>> {
+    let mut s = c.prepare(
+        "SELECT id, to_name, read_at FROM messages WHERE from_name=?1 AND id IN (SELECT value FROM json_each(?2))",
+    )?;
+    let rows = s.query_map(params![from, serde_json::to_string(ids)?], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Drops read messages that were read before `before`; returns how many.
+pub fn purge_read(
+    c: &Connection,
+    before: i64,
+) -> Res<usize> {
+    Ok(c.execute("DELETE FROM messages WHERE read_at IS NOT NULL AND read_at < ?1", [before])?)
 }
 
 /// All of `acks` in one commit.
@@ -239,9 +378,14 @@ pub fn apply_acks(
     acks: &[(String, i64)],
 ) -> Res<()> {
     let tx = c.transaction()?;
-    for (name, upto) in acks {
-        ack(&tx, name, *upto)?;
-    }
+    ack_all(&tx, acks)?;
     tx.commit()?;
     Ok(())
+}
+
+fn ack_all(
+    c: &Connection,
+    acks: &[(String, i64)],
+) -> Res<()> {
+    acks.iter().try_for_each(|(name, upto)| ack(c, name, *upto))
 }

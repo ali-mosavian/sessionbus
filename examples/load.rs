@@ -36,7 +36,7 @@ async fn main() {
         names.iter().zip(&keys).map(|(n, k)| format!("{n} {}\n", k.public_key().to_openssh().unwrap())).collect();
     std::fs::write(dir.join("authorized_keys"), auth).unwrap();
 
-    let hub = Hub::new(Db::open(&dir.join("bus.db")).unwrap(), dir.join("authorized_keys"));
+    let hub = Hub::with_limit(Db::open(&dir.join("bus.db")).unwrap(), dir.join("authorized_keys"), 1e9, 1e9);
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap().to_string();
     tokio::spawn(run(l, hub));

@@ -10,8 +10,8 @@ use sessionbus::{
 };
 use tokio::net::TcpListener;
 
-const USAGE: &str = "usage: sessionbus serve [--addr A] [--db F] [--keys F]
-       sessionbus list | topics | sub <topic> | unsub <topic> | send <to|#topic> <message> | inbox [--wait SECS]";
+const USAGE: &str = "usage: sessionbus serve [--addr A] [--db F] [--keys F] [--burst N] [--rate PER_SEC]
+       sessionbus list | topics | sub <topic> | unsub <topic> | send <to|#topic> <message> [--reply-to ID] [--status done|blocked] [--priority urgent] [--summary TEXT] | status <id>... | inbox [--wait SECS]";
 
 fn die(msg: impl std::fmt::Display) -> ! {
     eprintln!("sessionbus: {msg}");
@@ -44,7 +44,10 @@ async fn main() {
         let keys = opt(&mut args, "--keys").unwrap_or("authorized_keys".into());
         let db = Db::open(db.as_ref()).unwrap_or_else(|e| die(e));
         let l = TcpListener::bind(&addr).await.unwrap_or_else(|e| die(format!("{addr}: {e}")));
-        run(l, Hub::new(db, keys.into())).await;
+        let num =
+            |v: Option<String>, default: f64| v.map_or(default, |v| v.parse().unwrap_or_else(|_| die("bad number")));
+        let (burst, rate) = (num(opt(&mut args, "--burst"), 100.0), num(opt(&mut args, "--rate"), 20.0));
+        run(l, Hub::with_limit(db, keys.into(), burst, rate)).await;
         return;
     }
     if let Err(e) = client_cmd(&cmd, args).await {
@@ -70,7 +73,22 @@ async fn client_cmd(
         return Ok(());
     }
 
-    let req: Value = match (cmd, args.as_slice()) {
+    let mut extra = serde_json::Map::new();
+    if cmd == "send" {
+        for (flag, key) in
+            [("--reply-to", "reply_to"), ("--status", "status"), ("--priority", "priority"), ("--summary", "summary")]
+        {
+            if let Some(v) = opt(&mut args, flag) {
+                let v =
+                    if key == "reply_to" { json!(v.parse::<i64>().map_err(|_| "bad --reply-to")?) } else { json!(v) };
+                extra.insert(key.into(), v);
+            }
+        }
+    }
+    let mut req: Value = match (cmd, args.as_slice()) {
+        ("status", ids) if !ids.is_empty() => {
+            json!({"op": "status", "ids": ids.iter().map(|i| i.parse::<i64>()).collect::<Result<Vec<_>, _>>().map_err(|_| "ids must be numbers")?})
+        }
         ("list", []) => json!({"op": "list"}),
         ("topics", []) => json!({"op": "topics"}),
         ("sub", [t]) => json!({"op": "sub", "topic": t}),
@@ -78,6 +96,7 @@ async fn client_cmd(
         ("send", [to, msg @ ..]) if !msg.is_empty() => json!({"op": "send", "to": to, "body": msg.join(" ")}),
         _ => return Err(USAGE.into()),
     };
+    req.as_object_mut().expect("object").extend(extra);
     println!("{}", cfg.connect(false).await?.call(req).await?);
     Ok(())
 }

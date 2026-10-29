@@ -9,8 +9,9 @@ import { PassThrough } from "node:stream";
 import { createInterface } from "node:readline";
 import { after, before, test } from "node:test";
 
-import { configFromEnv, type Config } from "../src/client.ts";
-import { serve, wrap } from "../src/server.ts";
+import { BusError, Conn, configFromEnv, type Config } from "../src/client.ts";
+import { wrap } from "../src/format.ts";
+import { serve } from "../src/server.ts";
 import { loadKey, sshSign } from "../src/ssh.ts";
 
 const root = resolve(import.meta.dirname, "../..");
@@ -20,43 +21,48 @@ const bin = [process.env.SESSIONBUS_BIN, join(root, "target/debug/sessionbus"), 
 assert.ok(bin, "relay binary not found: run `cargo build` in the repo root");
 
 const dir = mkdtempSync(join(tmpdir(), "sessionbus-ts-"));
-let relay: ChildProcess;
+const relays: ChildProcess[] = [];
 let addr = "";
+let limitedAddr = "";
 
-/** A fresh session identity; the relay re-reads authorized_keys on every login. */
-function session(name: string): Config {
+/** A fresh session identity; relays re-read authorized_keys on every login. */
+function session(name: string, at = addr): Config {
   const keyPath = join(dir, `${name}.key`);
   execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", keyPath]);
   const [type, b64] = readFileSync(`${keyPath}.pub`, "utf8").split(" ");
   appendFileSync(join(dir, "authorized_keys"), `${name} ${type} ${b64}\n`);
-  return { addr, name, keyPath };
+  return { addr: at, name, keyPath };
 }
 
-before(async () => {
+async function startRelay(tag: string, extra: string[] = []): Promise<string> {
   const port = await new Promise<number>((res) => {
     const s = createServer().listen(0, "127.0.0.1", () => {
       const p = (s.address() as { port: number }).port;
       s.close(() => res(p));
     });
   });
-  addr = `127.0.0.1:${port}`;
-  writeFileSync(join(dir, "authorized_keys"), "");
-  relay = spawn(bin!, ["serve", "--addr", addr, "--db", join(dir, "bus.db"), "--keys", join(dir, "authorized_keys")], {
-    stdio: "inherit",
-  });
+  const at = `127.0.0.1:${port}`;
+  const args = ["serve", "--addr", at, "--db", join(dir, `${tag}.db`), "--keys", join(dir, "authorized_keys"), ...extra];
+  relays.push(spawn(bin!, args, { stdio: "inherit" }));
   for (let i = 0; ; i++) {
     const up = await new Promise<boolean>((res) => {
       const s = connect(port, "127.0.0.1");
       s.once("connect", () => (s.destroy(), res(true)));
       s.once("error", () => res(false));
     });
-    if (up) return;
+    if (up) return at;
     assert.ok(i < 100, "relay did not start");
     await new Promise((r) => setTimeout(r, 50));
   }
+}
+
+before(async () => {
+  writeFileSync(join(dir, "authorized_keys"), "");
+  addr = await startRelay("main");
+  limitedAddr = await startRelay("limited", ["--burst", "2", "--rate", "0.001"]);
 });
 
-after(() => relay.kill());
+after(() => relays.forEach((r) => r.kill()));
 
 class Mcp {
   input = new PassThrough();
@@ -132,11 +138,18 @@ test("tools mirror the built-in messaging tools, plus topics", opts, async () =>
   const tools = (await m.rpc("tools/list")).result.tools;
   assert.deepEqual(
     tools.map((t: any) => t.name),
-    ["ListAgents", "SendMessage", "ReadNotifications", "Subscribe", "Unsubscribe", "ListTopics"],
+    ["ListAgents", "SendMessage", "MessageStatus", "ReadNotifications", "Subscribe", "Unsubscribe", "ListTopics"],
   );
   const by = Object.fromEntries(tools.map((t: any) => [t.name, t.inputSchema]));
   assert.deepEqual(by.SendMessage.required, ["to", "message"]);
-  assert.deepEqual(Object.keys(by.SendMessage.properties).sort(), ["message", "summary", "to"]);
+  assert.deepEqual(Object.keys(by.SendMessage.properties).sort(), [
+    "message",
+    "priority",
+    "reply_to",
+    "status",
+    "summary",
+    "to",
+  ]);
   assert.deepEqual(by.ReadNotifications.properties, {});
   assert.equal(by.SendMessage.additionalProperties, false);
   assert.equal((await m.rpc("nope")).error.code, -32601);
@@ -147,12 +160,11 @@ test("a message is read once, and replying to `from` works", opts, async () => {
   const [a, bCfg] = [new Mcp(session("once-a")), session("once-b")];
   const b = new Mcp(bCfg);
   await b.tool("ListAgents"); // registers b with the relay
-  assert.deepEqual(await a.tool("SendMessage", { to: "once-b", message: "hi", summary: "greet" }), {
-    isError: false,
-    text: "Sent to once-b.",
-  });
+  const sent = await a.tool("SendMessage", { to: "once-b", message: "hi", summary: "greet" });
+  assert.equal(sent.isError, false);
+  assert.match(sent.text, /^Sent to once-b \(id \d+, queued\)\.$/);
   const got = await b.tool("ReadNotifications");
-  assert.match(got.text, /^<cross-session-message from="once-a" id="\d+">\nhi\n<\/cross-session-message>$/);
+  assert.match(got.text, /^<cross-session-message from="once-a" summary="greet" id="\d+">\nhi\n<\/cross-session-message>$/);
   const from = /from="([^"]+)"/.exec(got.text)![1]!;
   await b.tool("SendMessage", { to: from, message: "pong" });
   await b.finish(); // waits for the ack
@@ -185,16 +197,19 @@ test("a body cannot close its wrapper or forge another sender", opts, async () =
   const text = (await new Mcp(bCfg).tool("ReadNotifications")).text;
   assert.equal(text.match(/<cross-session-message /g)?.length, 1, text);
   assert.equal(text.match(/<\/cross-session-message>/g)?.length, 1, text);
-  assert.equal(wrap({ op: "msg", from: 'a"<b', id: 1, body: "" }).split("\n")[0], '<cross-session-message from="a&quot;&lt;b" id="1">');
+  assert.equal(
+    wrap({ op: "msg", from: 'a"<b', id: 1, body: "" }).split("\n")[0],
+    '<cross-session-message from="a&quot;&lt;b" id="1">',
+  );
   await a.finish();
 });
 
 test("topics: only subscribers receive it, not the sender", opts, async () => {
-  const cfgs = ["t-a", "t-b", "t-c"].map(session);
+  const cfgs = ["t-a", "t-b", "t-c"].map((n) => session(n));
   const [a, b, c] = cfgs.map((x) => new Mcp(x));
   assert.equal((await b.tool("Subscribe", { topic: "ops" })).text, "Subscribed to #ops.");
   await a.tool("Subscribe", { topic: "#ops" });
-  assert.equal((await a.tool("SendMessage", { to: "#ops", message: "deploy" })).text, "Sent to #ops (1 subscriber).");
+  assert.match((await a.tool("SendMessage", { to: "#ops", message: "deploy" })).text, /^Sent to #ops \(1 subscriber; ids \d+\)\.$/);
   assert.match((await b.tool("ReadNotifications")).text, /topic="ops" id="\d+">\ndeploy\n/);
   assert.equal((await a.tool("ReadNotifications")).text, "No pending notifications.");
   assert.equal((await c.tool("ReadNotifications")).text, "No pending notifications.");
@@ -231,4 +246,76 @@ test("errors come back as tool errors, not crashes", opts, async () => {
   const wrongKey = new Mcp({ ...session("err-b"), name: "err-a" });
   assert.match((await wrongKey.tool("ListAgents")).text, /auth failed/);
   await wrongKey.finish();
+});
+
+test("a sent message can be followed from queued to read", opts, async () => {
+  const [a, bCfg] = [new Mcp(session("trk-a")), session("trk-b")];
+  const b = new Mcp(bCfg);
+  await b.tool("ListAgents");
+  const sent = await a.tool("SendMessage", { to: "trk-b", message: "hi" });
+  const id = Number(/id (\d+), queued/.exec(sent.text)?.[1]);
+  assert.ok(id > 0, sent.text);
+  assert.equal((await a.tool("MessageStatus", { ids: [id, 999999] })).text, `${id} → trk-b: queued\n999999 → unknown`);
+  await b.tool("ReadNotifications");
+  await b.finish();
+  assert.equal((await a.tool("MessageStatus", { ids: [id] })).text, `${id} → trk-b: read`);
+  assert.equal((await b2(bCfg).tool("MessageStatus", { ids: [id] })).text, `${id} → unknown`, "only the sender may ask");
+  await a.finish();
+});
+
+const b2 = (cfg: Config) => new Mcp(cfg);
+
+test("labels reach the recipient, urgent first, and are escaped", opts, async () => {
+  const [a, bCfg] = [new Mcp(session("lab-a")), session("lab-b")];
+  await new Mcp(bCfg).tool("ListAgents");
+  await a.tool("SendMessage", { to: "lab-b", message: "later" });
+  await a.tool("SendMessage", {
+    to: "lab-b",
+    message: "stop",
+    priority: "urgent",
+    status: "blocked",
+    reply_to: 3,
+    summary: 'halt "now" <please>',
+  });
+  const text = (await new Mcp(bCfg).tool("ReadNotifications")).text;
+  const [first, second] = text.split("\n\n");
+  assert.match(
+    first!,
+    /^<cross-session-message from="lab-a" reply_to="3" status="blocked" priority="urgent" summary="halt &quot;now&quot; &lt;please>" id="\d+">\nstop\n/,
+  );
+  assert.match(second!, /^<cross-session-message from="lab-a" id="\d+">\nlater\n/);
+  await a.finish();
+});
+
+test("a send over the relay's budget fails loudly with a retry time", opts, async () => {
+  const a = new Mcp(session("rl-a", limitedAddr));
+  const b = session("rl-b", limitedAddr);
+  await new Mcp(b).tool("ListAgents");
+  assert.equal((await a.tool("SendMessage", { to: "rl-b", message: "1" })).isError, false);
+  assert.equal((await a.tool("SendMessage", { to: "rl-b", message: "2" })).isError, false);
+  const refused = await a.tool("SendMessage", { to: "rl-b", message: "3" });
+  assert.equal(refused.isError, true);
+  assert.match(refused.text, /rate limited.*retry after \d+ ms/);
+  await a.finish();
+});
+
+test("relay errors keep their machine code", opts, async () => {
+  const c = await Conn.open(session("code-a"), false);
+  try {
+    await c.call({ op: "send", to: "nobody", body: "x" });
+    assert.fail("accepted");
+  } catch (e) {
+    assert.ok(e instanceof BusError);
+    assert.equal(e.code, "unknown_recipient");
+  } finally {
+    c.close();
+  }
+});
+
+test("arguments the relay would refuse are caught up front", opts, async () => {
+  const a = new Mcp(session("arg-a"));
+  assert.match((await a.tool("SendMessage", { to: "x".repeat(66), message: "m" })).text, /at most 65/);
+  assert.match((await a.tool("MessageStatus", { ids: [] })).text, /1 to 200/);
+  assert.match((await a.tool("MessageStatus", { ids: ["1"] })).text, /1 to 200/);
+  await a.finish();
 });

@@ -23,6 +23,18 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): Config {
 
 export type Frame = { op: string; [k: string]: any };
 
+/** An error frame from the relay: `code` is the stable part (bad_request, auth,
+ * unknown_recipient, rate_limited, internal). */
+export class BusError extends Error {
+  code: string;
+  retryAfterMs?: number;
+  constructor(f: Frame) {
+    super(f.error);
+    this.code = f.code ?? "internal";
+    this.retryAfterMs = f.retry_after_ms;
+  }
+}
+
 const NAMESPACE = "sessionbus";
 const CONNECT_TIMEOUT_MS = 10_000;
 
@@ -61,7 +73,8 @@ export class Conn {
       const sig = sshSign(key, NAMESPACE, `sessionbus-v1:${ch.nonce}:${cfg.name}`);
       c.send({ op: "hello", name: cfg.name, sig, listen });
       const r = await c.next();
-      if (r?.op !== "ok") throw new Error(r?.error ?? "auth failed");
+      if (r?.op === "error") throw new BusError(r);
+      if (r?.op !== "ok") throw new Error("auth failed");
       return c;
     } catch (e) {
       c.close();
@@ -84,7 +97,7 @@ export class Conn {
     this.send(req);
     const r = await this.next();
     if (!r) throw new Error("connection closed");
-    if (r.op === "error") throw new Error(r.error);
+    if (r.op === "error") throw new BusError(r);
     return r;
   }
 
@@ -96,7 +109,7 @@ export class Conn {
       if (!f) throw new Error("connection closed");
       if (f.op === "msg") out.push(f);
       else if (f.op === "ready") return out;
-      else if (f.op === "error") throw new Error(f.error);
+      else if (f.op === "error") throw new BusError(f);
     }
   }
 
@@ -108,7 +121,7 @@ export class Conn {
       const f = await this.next();
       if (!f) throw new Error("connection closed");
       if (f.op === "topics") return;
-      if (f.op === "error") throw new Error(f.error);
+      if (f.op === "error") throw new BusError(f);
     }
   }
 

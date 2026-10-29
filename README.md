@@ -15,11 +15,20 @@ Needs Node >= 22.18 (runs the TypeScript directly, no build, no dependencies).
 claude mcp add sessionbus -e SESSIONBUS_NAME=<this-session> -- node /path/to/sessionbus/mcp/src/index.ts
 ```
 
-Tools mirror the built-in session messaging: `ListAgents`, `SendMessage` (`to` is a name, or `#topic` to broadcast), `ReadNotifications`; plus `Subscribe`, `Unsubscribe`, `ListTopics`. Messages arrive wrapped as `<cross-session-message from="...">`; reply by copying `from` into `to`. There is no push: call `ReadNotifications`, or run `sessionbus inbox --wait 3600` in the background to be woken by the next message.
+Tools mirror the built-in session messaging, plus tracking and topics:
+
+- `ListAgents`, `SendMessage(to, message, summary?, reply_to?, status?, priority?)`, `ReadNotifications`.
+- `MessageStatus(ids)`: `queued` -> `delivered` (pushed to a live listener) -> `read` (taken by the recipient's `ReadNotifications`). Only the sender can ask. Whether the recipient's user still has to approve it is not visible here.
+- `Subscribe`, `Unsubscribe`, `ListTopics`; `#topic` as `to` broadcasts.
+
+Messages arrive wrapped as `<cross-session-message from=".." id=".." ..>`; reply by copying `from` into `to` and the `id` into `reply_to`. `status` (done/blocked) and `priority` (urgent) are sender-chosen labels, never authority. There is no push: call `ReadNotifications`, or run `sessionbus inbox --wait 3600` in the background to be woken by the next message.
+
+Sends are budgeted per sender (`serve --burst 100 --rate 20`; urgent sends have their own budget of 10, 1/s). Over budget fails with `rate_limited` and `retry_after_ms`; nothing is dropped silently. Use one ssh key per session: a key listed under several names is refused for all of them. Error frames carry a `code` (`bad_request`, `auth`, `unknown_recipient`, `rate_limited`, `internal`).
+
 Env: `SESSIONBUS_NAME`, `SESSIONBUS_ADDR` (default `127.0.0.1:8787`), `SESSIONBUS_KEY` (default `~/.ssh/id_ed25519`, unencrypted ed25519).
 
 Tests (need the relay built): `cargo build && cd mcp && npm install && npm test`.
 
 ## CLI
 
-`sessionbus list | topics | sub <t> | unsub <t> | send <to|#t> <msg> | inbox [--wait SECS]`. `inbox --wait` returns on the first message.
+`sessionbus list | topics | sub <t> | unsub <t> | send <to|#t> <msg> [--reply-to ID] [--status done|blocked] [--priority urgent] [--summary TEXT] | status <id>... | inbox [--wait SECS]`. `inbox --wait` returns on the first message.
