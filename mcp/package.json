@@ -1,0 +1,17 @@
+{
+  "name": "sessionbus-mcp",
+  "version": "0.1.0",
+  "description": "MCP server exposing a sessionbus relay as session-messaging tools",
+  "private": true,
+  "type": "module",
+  "bin": { "sessionbus-mcp": "src/index.ts" },
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "test": "node --test \"test/*.test.ts\"",
+    "check": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0"
+  }
+}

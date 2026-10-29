@@ -2,3 +2,4 @@ target/
 *.db
 *.db-*
 authorized_keys
+node_modules/

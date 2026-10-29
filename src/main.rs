@@ -1,18 +1,17 @@
 //! Env: SESSIONBUS_NAME, SESSIONBUS_ADDR (default 127.0.0.1:8787),
-//! SESSIONBUS_KEY (default ~/.ssh/id_ed25519). `mcp` serves MCP on stdio.
-use std::{env, process::exit, sync::Arc, time::Duration};
+//! SESSIONBUS_KEY (default ~/.ssh/id_ed25519).
+use std::{env, process::exit, time::Duration};
 
 use serde_json::{Value, json};
 use sessionbus::{
     client::Config,
     db::Db,
-    mcp,
     server::{Hub, run},
 };
 use tokio::net::TcpListener;
 
 const USAGE: &str = "usage: sessionbus serve [--addr A] [--db F] [--keys F]
-       sessionbus list | topics | sub <topic> | unsub <topic> | send <to|#topic> <message> | inbox [--wait SECS] | mcp";
+       sessionbus list | topics | sub <topic> | unsub <topic> | send <to|#topic> <message> | inbox [--wait SECS]";
 
 fn die(msg: impl std::fmt::Display) -> ! {
     eprintln!("sessionbus: {msg}");
@@ -58,9 +57,6 @@ async fn client_cmd(
     mut args: Vec<String>,
 ) -> Result<(), String> {
     let cfg = Config::from_env();
-    if cmd == "mcp" {
-        return mcp::serve(Arc::new(cfg), tokio::io::stdin(), tokio::io::stdout()).await.map_err(|e| e.to_string());
-    }
     if cmd == "inbox" {
         let wait: u64 = opt(&mut args, "--wait").map_or(Ok(0), |w| w.parse()).map_err(|_| "bad --wait")?;
         let mut c = cfg.connect(true).await?;
