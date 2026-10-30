@@ -23,7 +23,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14, target: aarch64-apple-darwin, zig: false }
+          - { os: macos-15, target: aarch64-apple-darwin, zig: false }
           # glibc 2.17 floor: runs on any distro from the last decade
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, zig: true, zigtarget: "x86_64-unknown-linux-gnu.2.17" }
           - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu, zig: true, zigtarget: "aarch64-unknown-linux-gnu.2.17" }
