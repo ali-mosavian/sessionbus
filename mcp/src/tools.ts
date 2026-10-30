@@ -2,7 +2,7 @@
 // SendMessage, ListAgents and ReadNotifications mirror Claude Code's built-in
 // session messaging; the rest is topics and delivery tracking.
 import { AgentError, type Frame } from "./agent.ts";
-import { TAG, plural, wrap } from "./format.ts";
+import { TAG, ago, plural, wrap } from "./format.ts";
 
 export type Args = Record<string, any>;
 /** What a tool runs against. */
@@ -57,7 +57,10 @@ export const TOOLS: Record<string, Tool> = {
     input: schema({}),
     run: async ({ call, project }) => {
       const r = await call({ op: "list", project });
-      const rows = (r.sessions as Frame[]).map((s) => `${s.alias}@${s.host}${s.unread ? ` — ${s.unread} unread` : ""}`);
+      const rows = (r.sessions as Frame[]).map((s) => {
+        const notes = [s.last_seen ? `seen ${ago(s.last_seen)}` : "", s.unread ? `${s.unread} unread` : ""].filter(Boolean);
+        return `${s.alias}@${s.host}${notes.length ? ` — ${notes.join(", ")}` : ""}`;
+      });
       return { text: rows.join("\n") || "No sessions have taken a name in this project yet." };
     },
   },
@@ -105,9 +108,11 @@ export const TOOLS: Record<string, Tool> = {
         ttl_s: ttl_minutes ? ttl_minutes * 60 : undefined,
       });
       const sent = r.sent as Frame[];
-      if (!sent.length) return { text: `Sent to ${to}, which has no subscribers.` };
+      if (!sent.length) return { text: `NOT delivered: nobody is subscribed to ${to}. Subscribe sessions first (Subscribe), or message them directly.` };
       const rows = sent.map((s) => `${s.to_alias}@${s.to_host} (id ${s.id}, ${s.state})`);
-      return { text: `Sent to ${rows.join("; ")}. "queued" means the host is not reachable yet: it keeps trying until the message expires.` };
+      const waiting = sent.some((s) => s.state === "queued");
+      const who = to.startsWith("#") ? ` ${to} has ${plural(sent.length, "subscriber")}:` : "";
+      return { text: `Sent.${who} ${rows.join("; ")}${waiting ? ". queued: that host is not reachable yet; it keeps trying until the message expires." : ""}` };
     },
   },
 

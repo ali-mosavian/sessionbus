@@ -520,3 +520,36 @@ fn anchor_is_the_nearest_non_shell_ancestor() {
     let mcp = [p(31, "node"), p(11, "-bash"), p(10, "claude")];
     assert_eq!(agent::anchor(&mcp).unwrap().0, 10);
 }
+
+/// After a rename the old name was dead at once, so a sender who had not heard of it got
+/// `unknown_recipient`. It must keep reaching the same session for a while, from other hosts too.
+#[tokio::test]
+async fn renamed_session_still_answers_to_its_old_name() {
+    let (a, b) = (host("A").await, host("B").await);
+    link(&a, &b).await;
+    a.setup("sa", "alice").await;
+    b.setup("sb", "bob").await;
+    b.setup("sb", "robert").await;
+    wait_until(|| async {
+        let v = a.call("sa", json!({"op": "send", "project": "p", "to": "bob", "body": "old name"})).await;
+        v["ok"] == true
+    })
+    .await;
+    wait_until(|| async { b.inbox("sb").await.iter().any(|m| m["body"] == "old name") }).await;
+    let gone = a.call("sa", json!({"op": "send", "project": "p", "to": "nobody", "body": "x"})).await;
+    assert_eq!(gone["error"]["code"], "unknown_recipient");
+}
+
+/// `ListAgents` showed no sign of life for sessions on other hosts, so nobody could tell
+/// which were alive.
+#[tokio::test]
+async fn list_gives_last_seen_for_sessions_on_other_hosts() {
+    let (a, b) = (host("A").await, host("B").await);
+    link(&a, &b).await;
+    b.setup("sb", "bob").await;
+    wait_until(|| async {
+        let v = a.ok("x", json!({"op": "list", "project": "p"})).await;
+        v["sessions"].as_array().unwrap().iter().any(|s| s["alias"] == "bob" && s["last_seen"].is_i64())
+    })
+    .await;
+}

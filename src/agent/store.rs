@@ -53,6 +53,8 @@ pub fn open(path: &Path) -> Res<Connection> {
          CREATE TABLE IF NOT EXISTS pids(pid INTEGER PRIMARY KEY, started TEXT NOT NULL, session TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS aliases(project TEXT NOT NULL, alias TEXT NOT NULL, session TEXT NOT NULL,
              PRIMARY KEY(project, alias), UNIQUE(project, session));
+         CREATE TABLE IF NOT EXISTS former(project TEXT NOT NULL, alias TEXT NOT NULL, session TEXT NOT NULL, expires INTEGER NOT NULL,
+             PRIMARY KEY(project, alias));
          CREATE TABLE IF NOT EXISTS projects(name TEXT PRIMARY KEY);
          CREATE TABLE IF NOT EXISTS subs(project TEXT NOT NULL, topic TEXT NOT NULL, session TEXT NOT NULL,
              PRIMARY KEY(project, topic, session));
@@ -184,8 +186,19 @@ pub fn set_alias(
         }
         tx.execute("DELETE FROM aliases WHERE project=?1 AND alias=?2", params![project, alias])?;
     }
+    let old: Option<String> = tx
+        .query_row("SELECT alias FROM aliases WHERE project=?1 AND session=?2", params![project, session], |r| r.get(0))
+        .optional()?;
     tx.execute("DELETE FROM aliases WHERE project=?1 AND session=?2", params![project, session])?;
     tx.execute("INSERT INTO aliases(project, alias, session) VALUES(?1, ?2, ?3)", params![project, alias, session])?;
+    tx.execute("DELETE FROM former WHERE project=?1 AND alias=?2", params![project, alias])?;
+    if let Some(old) = old.filter(|o| o != alias) {
+        // senders still using the old name reach this session for as long as a message lives
+        tx.execute(
+            "INSERT OR REPLACE INTO former(project, alias, session, expires) VALUES(?1, ?2, ?3, ?4)",
+            params![project, old, session, now() + 3600],
+        )?;
+    }
     tx.commit()?;
     Ok(())
 }
@@ -201,6 +214,12 @@ pub fn alias_of(
 pub fn local_aliases(c: &Connection) -> Res<Vec<(String, String, String)>> {
     let mut s = c.prepare("SELECT project, alias, session FROM aliases ORDER BY project, alias")?;
     Ok(s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<Result<_, _>>()?)
+}
+
+/// Names a session recently gave up: `(project, alias, session)`.
+pub fn local_former(c: &Connection) -> Res<Vec<(String, String, String)>> {
+    let mut s = c.prepare("SELECT project, alias, session FROM former WHERE expires>?1 ORDER BY project, alias")?;
+    Ok(s.query_map([now()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<Result<_, _>>()?)
 }
 
 pub fn projects(c: &Connection) -> Res<Vec<String>> {
@@ -326,6 +345,7 @@ pub fn expire(c: &Connection) -> Res<usize> {
     for id in &ids {
         c.execute("UPDATE sent SET state='expired' WHERE id=?1 AND state='queued'", [id])?;
     }
+    c.execute("DELETE FROM former WHERE expires<=?1", [t])?;
     let mut n = c.execute("DELETE FROM outbox WHERE expires<=?1", [t])?;
     n += c.execute("DELETE FROM inbox WHERE read_at IS NULL AND expires<=?1", [t])?;
     Ok(n)

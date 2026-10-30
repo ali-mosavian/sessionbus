@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { createInterface } from "node:readline";
 import { after, before, test } from "node:test";
@@ -150,5 +154,42 @@ test("a message to a host that is down is delivered when the host comes back", a
   } finally {
     h1.stop();
     h2.stop();
+  }
+});
+
+/** Every successful send carried a sentence explaining "queued", which read like a failure. */
+test("a delivered send does not explain queueing, and a topic send names its subscribers", async () => {
+  const [a, b, c] = [mcp("s-j"), mcp("s-k"), mcp("s-l")];
+  await a.tool("ListAgents", { project: "t", as: "jo" });
+  await b.tool("ListAgents", { project: "t", as: "kim" });
+  await c.tool("ListAgents", { project: "t", as: "lee" });
+  const direct = await a.tool("SendMessage", { project: "t", to: "kim", message: "hi" });
+  assert.match(direct.text, /delivered/);
+  assert.doesNotMatch(direct.text, /keeps trying/);
+  const none = await a.tool("SendMessage", { project: "t", to: "#empty", message: "anyone?" });
+  assert.match(none.text, /NOT delivered: nobody is subscribed/);
+  await b.tool("Subscribe", { project: "t", topic: "news" });
+  await c.tool("Subscribe", { project: "t", topic: "news" });
+  const fan = await a.tool("SendMessage", { project: "t", to: "#news", message: "all" });
+  assert.match(fan.text, /#news has 2 subscribers/);
+  await Promise.all([a.close(), b.close(), c.close()]);
+});
+
+test("ListAgents says when each session was last seen", async () => {
+  const [a, b] = [mcp("s-m"), mcp("s-n")];
+  await a.tool("ListAgents", { project: "t", as: "mia" });
+  await b.tool("ListAgents", { project: "t", as: "ned" });
+  assert.match((await a.tool("ListAgents", { project: "t" })).text, /ned@t1 — seen \d+s ago/);
+  await Promise.all([a.close(), b.close()]);
+});
+
+/** A timeout used to say only "did not answer", leaving the sender to guess whether the message was sent. */
+test("a timeout says the request may have been applied", async () => {
+  const sock = join(mkdtempSync(join(tmpdir(), "sb-")), "mute.sock");
+  const mute = createServer(() => {}).listen(sock);
+  try {
+    await assert.rejects(call({ op: "projects" }, { sock, timeoutMs: 100 }), /may or may not have been applied.*MessageStatus/);
+  } finally {
+    mute.close();
   }
 });

@@ -25,11 +25,11 @@ export interface Target {
 export const socketPath = (): string => process.env.SESSIONBUS_SOCK ?? join(homedir(), ".sessionbus", "agent.sock");
 
 /** Sends `req` and returns the reply; `timeoutMs` bounds the wait for it. */
-export function call(req: Frame, { sock = socketPath(), session = process.env.SESSIONBUS_SESSION, timeoutMs = 5000 }: Target = {}): Promise<Frame> {
+export function call(req: Frame, { sock = socketPath(), session = process.env.SESSIONBUS_SESSION, timeoutMs = 15000 }: Target = {}): Promise<Frame> {
   return new Promise((resolve, reject) => {
     const s = connect(sock);
     let buf = "";
-    const timer = setTimeout(() => fail(new AgentError("timeout", "the sessionbus agent did not answer in time")), timeoutMs);
+    const timer = setTimeout(() => fail(new AgentError("timeout", `the sessionbus agent did not answer within ${timeoutMs / 1000}s (the host may be overloaded). The request may or may not have been applied: check MessageStatus or ListAgents before sending again`)), timeoutMs);
     const fail = (e: Error) => {
       clearTimeout(timer);
       s.destroy();

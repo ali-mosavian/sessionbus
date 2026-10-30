@@ -114,6 +114,18 @@ fn universe(agent: &Agent) -> Res<(Vec<(String, String, String, String)>, Vec<(S
     Ok((al, subs, projects))
 }
 
+/// Names sessions recently gave up, as `(host, project, alias, session)`.
+fn former(agent: &Agent) -> Res<Vec<(String, String, String, String)>> {
+    let db = agent.db();
+    let me = agent.cfg.host.clone();
+    let mut out: Vec<_> = store::local_former(&db)?.into_iter().map(|(p, a, s)| (me.clone(), p, a, s)).collect();
+    for (host, rec) in store::directory(&db)? {
+        let t = |r: &Value, i: usize| r[i].as_str().unwrap_or_default().to_string();
+        out.extend(rec["former"].as_array().into_iter().flatten().map(|r| (host.clone(), t(r, 0), t(r, 1), t(r, 2))));
+    }
+    Ok(out)
+}
+
 fn known_project(
     agent: &Agent,
     project: &str,
@@ -164,6 +176,13 @@ fn resolve(
         .map(|a| (a.0.clone(), a.3.clone(), a.2.clone()))
         .collect();
     if hits.is_empty() {
+        hits = former(agent)?
+            .into_iter()
+            .filter(|f| f.1 == project && f.2 == name && on_host(&f.0))
+            .map(|f| (f.0, f.3.clone(), alias_of(&f.3)))
+            .collect();
+    }
+    if hits.is_empty() {
         // a session id, for sessions that never took an alias
         let db = agent.db();
         let me = &agent.cfg.host;
@@ -178,7 +197,10 @@ fn resolve(
         1 => Ok(hits),
         0 => {
             let names: Vec<String> = al.iter().filter(|a| a.1 == project).map(|a| format!("{}@{}", a.2, a.0)).collect();
-            Err(BusErr::new("unknown_recipient", format!("no session \"{to}\" in {project}; known: [{}]", names.join(", "))))
+            Err(BusErr::new("unknown_recipient", format!(
+                    "no session \"{to}\" in {project}; known: [{}]. A session is listed once it has called any sessionbus tool with `as`; renamed sessions answer to their old name for an hour only",
+                    names.join(", ")
+                )))
         }
         _ => {
             let names: Vec<String> = hits.iter().map(|h| format!("{}@{}", h.2, h.0)).collect();
@@ -250,7 +272,14 @@ fn list(
     let (al, _, _) = universe(agent)?;
     let db = agent.db();
     let unread: std::collections::HashMap<_, _> = store::unread_counts(&db)?.into_iter().collect();
-    let seen: std::collections::HashMap<_, _> = store::sessions(&db)?.into_iter().collect();
+    let mut seen: std::collections::HashMap<String, i64> = store::sessions(&db)?.into_iter().collect();
+    for (_, rec) in store::directory(&db)? {
+        for r in rec["sessions"].as_array().into_iter().flatten() {
+            if let (Some(id), Some(t)) = (r[0].as_str(), r[1].as_i64()) {
+                seen.insert(id.into(), t);
+            }
+        }
+    }
     let sessions: Vec<Value> = al
         .iter()
         .filter(|a| a.1 == project)
@@ -258,7 +287,7 @@ fn list(
             let local = a.0 == agent.cfg.host;
             json!({"alias": a.2, "session": a.3, "host": a.0,
                    "unread": if local { unread.get(&a.3).copied() } else { None },
-                   "last_seen": if local { seen.get(&a.3).copied() } else { None }})
+                   "last_seen": seen.get(&a.3).copied()})
         })
         .collect();
     let hosts: Vec<Value> = store::directory(&db)?.into_iter().map(|(h, r)| json!({"host": h, "version": r["version"]})).collect();

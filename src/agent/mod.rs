@@ -193,6 +193,7 @@ impl Agent {
             "addr": self.cfg.advertise,
             "sessions": store::sessions(&db)?,
             "aliases": store::local_aliases(&db)?,
+            "former": store::local_former(&db)?,
             "subs": store::local_subs(&db)?,
             "projects": store::projects(&db)?,
         }))
