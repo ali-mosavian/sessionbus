@@ -40,11 +40,11 @@ export function installHooks(write: boolean, path = userSettingsPath()): string 
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw new Error(`${path}: ${(e as Error).message}`);
   }
-  const next = JSON.stringify(withHooks(current), null, 2) + "\n";
-  if (write) {
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, next);
-    return `Wrote the sessionbus hooks to ${path}. New Claude Code sessions use them.`;
+  if (!write) {
+    // only what would be added: the rest of the file is the user's business
+    return JSON.stringify({ hooks: withHooks({}).hooks }, null, 2) + "\n";
   }
-  return next;
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(withHooks(current), null, 2) + "\n");
+  return `Wrote the sessionbus hooks to ${path}. New Claude Code sessions use them.`;
 }

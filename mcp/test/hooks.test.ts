@@ -27,6 +27,14 @@ test("installing twice, or from a moved package, leaves one waiter per event and
   assert.ok(twice.hooks!.Stop!.some((g) => g.hooks.some((h) => h.command === "echo mine")), "another hook was dropped");
 });
 
+test("printing shows only the hooks to add, never the rest of the user's settings", () => {
+  const path = join(mkdtempSync(join(tmpdir(), "sessionbus-hooks-")), "settings.json");
+  writeFileSync(path, JSON.stringify({ permissions: { allow: ["Bash(secret-tool *)"] } }));
+  const out = installHooks(false, path);
+  assert.doesNotMatch(out, /secret-tool|permissions/, "the dry run echoed the user's other settings");
+  assert.deepEqual(Object.keys(JSON.parse(out).hooks).sort(), ["SessionStart", "Stop"]);
+});
+
 test("--write merges into an existing settings file, and printing changes nothing", () => {
   const path = join(mkdtempSync(join(tmpdir(), "sessionbus-hooks-")), "settings.json");
   writeFileSync(path, JSON.stringify({ permissions: { allow: ["Bash(ls)"] } }));
