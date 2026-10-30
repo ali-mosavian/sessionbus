@@ -30,6 +30,71 @@ fn opt(
     Some(args.remove(i))
 }
 
+fn home_dir() -> std::path::PathBuf {
+    let home = env::var("HOME").unwrap_or_else(|_| die("HOME is not set"));
+    std::path::PathBuf::from(home).join(".sessionbus")
+}
+
+fn hostname() -> String {
+    let out = std::process::Command::new("hostname").output().ok();
+    let h = out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    h.split('.').next().unwrap_or("").to_lowercase()
+}
+
+/// `sessionbus agent [--dir D] [--host H] [--listen A] [--advertise A] [--peer NAME=ADDR]...`
+async fn run_agent(mut args: Vec<String>) {
+    use sessionbus::agent::{Config, start};
+    let dir = opt(&mut args, "--dir").map_or_else(home_dir, Into::into);
+    let host = opt(&mut args, "--host").unwrap_or_else(hostname);
+    if host.is_empty() {
+        die("cannot tell this host's name; pass --host");
+    }
+    let mut cfg = Config::new(&host, dir);
+    if let Some(l) = opt(&mut args, "--listen") {
+        cfg.listen = l;
+    }
+    cfg.advertise = opt(&mut args, "--advertise");
+    while let Some(p) = opt(&mut args, "--peer") {
+        let (n, a) = p.split_once('=').unwrap_or_else(|| die("--peer wants NAME=ADDR"));
+        cfg.peers.push((n.into(), a.into()));
+    }
+    if !args.is_empty() {
+        die(format!("unexpected {args:?}"));
+    }
+    let run = start(cfg).await.unwrap_or_else(|e| die(e));
+    eprintln!("sessionbus agent {host}: peers on {}, sessions on {}", run.addr, run.agent.cfg.sock.display());
+    std::future::pending::<()>().await;
+}
+
+/// `sessionbus hook` registers the session named on stdin (Claude Code's hook
+/// payload); `sessionbus call JSON` sends one request to the local agent.
+async fn local_call(
+    cmd: &str,
+    mut args: Vec<String>,
+) {
+    use tokio::{io::{AsyncBufReadExt, AsyncWriteExt, BufReader}, net::UnixStream};
+    let sock = env::var("SESSIONBUS_SOCK").map_or_else(|_| home_dir().join("agent.sock"), Into::into);
+    let req = if cmd == "hook" {
+        let mut input = String::new();
+        let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input);
+        let p: Value = serde_json::from_str(&input).unwrap_or_else(|_| die("hook input is not JSON"));
+        let session = p["session_id"].as_str().unwrap_or_else(|| die("hook input has no session_id"));
+        json!({"op": "register", "session": session, "cwd": p["cwd"]})
+    } else {
+        serde_json::from_str(&args.pop().unwrap_or_else(|| die("call wants a JSON request")))
+            .unwrap_or_else(|e| die(e))
+    };
+    let s = UnixStream::connect(&sock).await.unwrap_or_else(|e| die(format!("agent not running at {}: {e}", sock.display())));
+    let (r, mut w) = s.into_split();
+    w.write_all(format!("{req}\n").as_bytes()).await.unwrap_or_else(|e| die(e));
+    let mut line = String::new();
+    BufReader::new(r).read_line(&mut line).await.unwrap_or_else(|e| die(e));
+    print!("{line}");
+    if line.contains("\"error\"") {
+        exit(1);
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let mut args: Vec<String> = env::args().skip(1).collect();
@@ -38,6 +103,12 @@ async fn main() {
         exit(2);
     }
     let cmd = args.remove(0);
+    if cmd == "agent" {
+        return run_agent(args).await;
+    }
+    if cmd == "hook" || cmd == "call" {
+        return local_call(&cmd, args).await;
+    }
     if cmd == "serve" {
         let addr = opt(&mut args, "--addr").unwrap_or("127.0.0.1:8787".into());
         let db = opt(&mut args, "--db").unwrap_or("sessionbus.db".into());

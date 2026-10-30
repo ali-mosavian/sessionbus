@@ -295,7 +295,7 @@ async fn handle(
             (true, Some(a)) => a,
             _ => {
                 let chain = ancestry(pid.ok_or_else(|| BusErr::new("unidentified", "no peer pid"))?);
-                chain.iter().skip(1).find(|c| c.1.contains("claude")).or(chain.get(1)).map_or(0, |c| c.0)
+                chain.iter().skip(1).find(|c| c.1.contains("claude") || c.1.ends_with("node")).or(chain.get(1)).map_or(0, |c| c.0)
             }
         };
         let old = store::register_session(&mut agent.db(), session, req["cwd"].as_str().unwrap_or(""), anchor)?;
