@@ -4,6 +4,7 @@
 //! Wire: newline-delimited JSON over TCP. Relay binds loopback; reach it
 //! through an SSH tunnel. Auth: relay sends a nonce, client signs it with its
 //! ssh key (see `authorized_keys`).
+pub mod agent;
 pub mod client;
 pub mod db;
 pub mod server;
