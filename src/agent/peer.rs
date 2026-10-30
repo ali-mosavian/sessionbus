@@ -7,13 +7,13 @@ use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
-    time::{sleep, timeout},
+    time::timeout,
 };
 
 use super::{Agent, store};
 use crate::db::{Res, now};
 
-const MAX_LINE: usize = 1 << 20;
+const MAX_LINE: usize = 16 << 20;
 
 pub async fn accept(
     agent: Arc<Agent>,
@@ -62,7 +62,7 @@ fn handle(
             Ok(json!({"t": "dir", "record": agent.record()?}))
         }
         "msg" => {
-            let e: store::Envelope = serde_json::from_value(m["env"].clone())?;
+            let e: store::Envelope = serde_json::from_value(m["env"].clone()).map_err(|e| crate::db::BusErr::bad_request(e.to_string()))?;
             if store::deliver(&agent.db(), &e)? {
                 agent.wake_inbox();
             }
@@ -82,6 +82,7 @@ pub async fn pump(agent: Arc<Agent>) {
     loop {
         let _ = timeout(agent.cfg.retry, agent.kick.notified()).await;
         let _ = store::expire(&agent.db());
+        let _ = store::purge(&agent.db(), 86400, 7 * 86400);
         let hosts = store::hosts_with_outbox(&agent.db()).unwrap_or_default();
         for h in hosts {
             if let Some(addr) = agent.peer_addr(&h) {
@@ -113,32 +114,35 @@ async fn push_to(
     let mine = agent.record().ok()?;
     let theirs = exchange(&mut r, &mut w, json!({"t": "dir", "record": mine})).await?;
     agent.learn(&theirs["record"]).ok()?;
-    loop {
-        let items = store::due_outbox(&agent.db(), host, 50).ok()?;
-        if items.is_empty() {
-            return Some(());
-        }
-        for it in items {
-            let m = match it.kind.as_str() {
-                "msg" => {
-                    let mut e: Value = serde_json::from_str(&it.payload).ok()?;
-                    e["ttl_s"] = json!((it.expires - now()).max(1));
-                    json!({"t": "msg", "env": e})
-                }
-                "receipt" => {
-                    let mut m: Value = serde_json::from_str(&it.payload).ok()?;
-                    m["t"] = json!("receipt");
-                    m
-                }
-                _ => json!({"t": "dir", "record": serde_json::from_str::<Value>(&it.payload).ok()?}),
-            };
-            let reply = exchange(&mut r, &mut w, m).await?;
-            if reply["t"] == "err" && reply["code"] != "bad_request" {
-                return None;
+    let items = store::due_outbox(&agent.db(), host, 50).ok()?;
+    let mut failed = false;
+    for it in items {
+        let m = match it.kind.as_str() {
+            "msg" => {
+                let mut e: Value = serde_json::from_str(&it.payload).ok()?;
+                e["ttl_s"] = json!((it.expires - now()).max(1));
+                json!({"t": "msg", "env": e})
             }
-            // a request the receiver can never accept would block the queue for ever
+            "receipt" => {
+                let mut m: Value = serde_json::from_str(&it.payload).ok()?;
+                m["t"] = json!("receipt");
+                m
+            }
+            _ => json!({"t": "dir", "record": serde_json::from_str::<Value>(&it.payload).ok()?}),
+        };
+        let reply = exchange(&mut r, &mut w, m).await?;
+        if reply["t"] != "err" {
             store::outbox_done(&agent.db(), host, &it.id, &it.kind, &it.payload).ok()?;
+        } else if reply["code"] == "bad_request" {
+            // never acceptable: drop it so it cannot block the rest, and say so to the sender
+            store::outbox_reject(&agent.db(), host, &it.id).ok()?;
+        } else {
+            failed = true; // retry next round, but let the items behind it through
         }
-        sleep(Duration::from_millis(1)).await;
     }
+    if failed {
+        return None;
+    }
+    // items queued meanwhile
+    if store::due_outbox(&agent.db(), host, 1).ok()?.is_empty() { Some(()) } else { Box::pin(push_to(agent, host, addr)).await }
 }

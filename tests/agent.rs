@@ -354,3 +354,155 @@ fn tailnet_peers_are_the_users_own_devices_by_dns_label() {
     assert!(!auth("100.1.2.3".parse().unwrap()));
     assert!(tailnet::parse(&TAILNET.replace("Running", "Stopped")).is_err());
 }
+
+/// A new process that got a dead Claude's pid number was taken for a `/clear` and
+/// inherited the dead session's names and mail; the start time tells them apart.
+#[tokio::test]
+async fn reused_pid_is_not_taken_for_a_replaced_session() {
+    let a = host("A").await;
+    a.ok("x", json!({"op": "addproject", "name": "p"})).await;
+    a.ok("old", json!({"op": "register", "session": "old", "anchor": 4242, "anchor_started": "Mon Jan 1 00:00:00 2026"})).await;
+    a.setup("old", "bob").await;
+    let v = a.ok("new", json!({"op": "register", "session": "new", "anchor": 4242, "anchor_started": "Tue Feb 2 00:00:00 2026"})).await;
+    assert_eq!(v["replaced"], Value::Null);
+    assert!(a.ok("new", json!({"op": "whoami"})).await["aliases"].as_array().unwrap().is_empty());
+}
+
+/// A restarted Claude is a new session: its predecessor's name stayed taken for ever.
+#[tokio::test]
+async fn name_of_a_gone_session_can_be_taken_over() {
+    let a = host("A").await;
+    a.ok("x", json!({"op": "addproject", "name": "p"})).await;
+    a.ok("old", json!({"op": "register", "session": "old", "anchor": 4242, "anchor_started": "never ran"})).await;
+    a.setup("old", "bob").await;
+    a.setup("s1", "alice").await;
+    a.setup("new", "bob").await;
+    a.ok("s1", json!({"op": "send", "project": "p", "to": "bob", "body": "hi"})).await;
+    assert_eq!(a.inbox("new").await.len(), 1);
+    assert!(a.inbox("old").await.is_empty());
+}
+
+fn env(id: &str, body: &str) -> Value {
+    json!({"id": id, "project": "p", "from_session": "s", "from_alias": "al", "from_host": "A",
+        "to_session": "sb", "topic": null, "body": body, "reply_to": null, "status": null, "priority": null,
+        "summary": null, "ttl_s": 60})
+}
+
+async fn raw_line(
+    addr: &str,
+    m: Value,
+) -> Value {
+    let s = TcpStream::connect(addr).await.unwrap();
+    let (r, mut w) = s.into_split();
+    w.write_all(format!("{m}\n").as_bytes()).await.unwrap();
+    let mut l = String::new();
+    BufReader::new(r).read_line(&mut l).await.unwrap();
+    serde_json::from_str(&l).unwrap()
+}
+
+/// An envelope the receiver cannot parse used to come back as `internal`, which the
+/// sender retried for ever, blocking every message queued behind it.
+#[tokio::test]
+async fn malformed_envelope_is_refused_as_bad_request() {
+    let b = host("B").await;
+    let r = raw_line(&b.listen, json!({"t": "msg", "env": {"id": "x"}})).await;
+    assert_eq!((r["t"].as_str(), r["code"].as_str()), (Some("err"), Some("bad_request")));
+}
+
+/// A peer that refuses one message for good must not stall the queue, and the
+/// sender must not report that message as delivered.
+#[tokio::test]
+async fn refused_message_is_rejected_and_does_not_block_the_next() {
+    let a = host("A").await;
+    a.ok("x", json!({"op": "addproject", "name": "p"})).await;
+    a.setup("sa", "alice").await;
+    let fake = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fake_addr = fake.local_addr().unwrap().to_string();
+    let record = json!({"host": "F", "version": 1, "addr": fake_addr, "sessions": [["sf", 1]],
+        "aliases": [["p", "fred", "sf"]], "subs": [], "projects": ["p"]});
+    tokio::spawn(async move {
+        loop {
+            let (s, _) = fake.accept().await.unwrap();
+            let record = record.clone();
+            tokio::spawn(async move {
+                let (r, mut w) = s.into_split();
+                let mut lines = BufReader::new(r).lines();
+                while let Ok(Some(l)) = lines.next_line().await {
+                    let m: Value = serde_json::from_str(&l).unwrap();
+                    let reply = match m["t"].as_str() {
+                        Some("dir") => json!({"t": "dir", "record": record}),
+                        _ if m["env"]["body"] == "bad" => json!({"t": "err", "code": "bad_request", "message": "no"}),
+                        _ => json!({"t": "ack", "id": m["env"]["id"]}),
+                    };
+                    w.write_all(format!("{reply}\n").as_bytes()).await.unwrap();
+                }
+            });
+        }
+    });
+    a.run.agent.set_peer("F", &fake_addr);
+    wait_until(|| async { a.ok("sa", json!({"op": "list", "project": "p"})).await["hosts"].as_array().unwrap().len() == 1 }).await;
+    let bad = a.ok("sa", json!({"op": "send", "project": "p", "to": "fred", "body": "bad"})).await["sent"][0]["id"].clone();
+    let good = a.ok("sa", json!({"op": "send", "project": "p", "to": "fred", "body": "good"})).await["sent"][0]["id"].clone();
+    wait_until(|| async { a.state("sa", &good).await == "delivered" }).await;
+    assert_eq!(a.state("sa", &bad).await, "rejected");
+}
+
+/// A message whose ack was lost can expire on the sender before the receipt arrives;
+/// the receipt still has to win, or a read message is reported expired.
+#[test]
+fn read_receipt_overrides_expired() {
+    use sessionbus::agent::store;
+    let mut c = store::open(&dir_file()).unwrap();
+    let s = store::Sent { id: "m1".into(), project: "p".into(), to_session: "b".into(), to_alias: "bob".into(), to_host: "B".into(), state: "queued".into() };
+    store::queue_sent(&mut c, &s, "a", Some(("msg", "{}", sessionbus::db::now() - 1))).unwrap();
+    store::expire(&c).unwrap();
+    assert_eq!(store::sent_status(&c, "a", &["m1".into()]).unwrap()[0].state, "expired");
+    store::set_sent_state(&c, "m1", "read").unwrap();
+    assert_eq!(store::sent_status(&c, "a", &["m1".into()]).unwrap()[0].state, "read");
+}
+
+fn dir_file() -> PathBuf {
+    let d = dir();
+    std::fs::create_dir_all(&d).unwrap();
+    d.join("t.db")
+}
+
+/// Read mail, old status rows and sessions nobody has used for days piled up for ever
+/// and made the directory record outgrow the wire limit.
+#[test]
+fn purge_drops_idle_sessions_but_keeps_those_with_unread_mail() {
+    use sessionbus::agent::store;
+    let mut c = store::open(&dir_file()).unwrap();
+    store::touch_session(&c, "idle").unwrap();
+    store::touch_session(&c, "mail").unwrap();
+    store::add_project(&c, "p").unwrap();
+    store::set_alias(&mut c, "p", "idle", "ivy", &|_| false).unwrap();
+    let e = |id: &str, to: &str| sessionbus::agent::store::Envelope {
+        id: id.into(), project: "p".into(), from_session: "s".into(), from_alias: "a".into(), from_host: "H".into(),
+        to_session: to.into(), topic: None, body: "x".into(), reply_to: None, status: None, priority: None, summary: None, ttl_s: 60,
+    };
+    store::deliver(&c, &e("m1", "mail")).unwrap();
+    store::purge(&c, 86400, -1).unwrap();
+    let left: Vec<String> = store::sessions(&c).unwrap().into_iter().map(|s| s.0).collect();
+    assert_eq!(left, ["mail"]);
+    assert!(store::local_aliases(&c).unwrap().is_empty());
+}
+
+/// A freshly started agent must tell the peers it knows about itself; it used to wait
+/// for the first local change, so a restarted host stayed invisible.
+#[tokio::test]
+async fn starting_agent_announces_itself_to_known_peers() {
+    let b = host("B").await;
+    let mut cfg = Config::new("A", dir());
+    cfg.listen = free_addr();
+    cfg.advertise = Some(cfg.listen.clone());
+    cfg.retry = Duration::from_millis(100);
+    cfg.trust_clients = true;
+    cfg.peers = vec![("B".into(), b.listen.clone())];
+    let _a = agent::start(cfg).await.unwrap();
+    wait_until(|| async {
+        let r = b.ok("x", json!({"op": "peers"})).await;
+        r["peers"].as_array().unwrap().iter().any(|p| p["host"] == "A" && p["in_directory"] == true)
+    })
+    .await;
+}

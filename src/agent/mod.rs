@@ -117,6 +117,7 @@ pub async fn start(cfg: Config) -> Res<Running> {
         version: AtomicI64::new(0),
         waiters: Mutex::new(HashMap::new()),
     });
+    let _ = agent.publish();
     let tasks = vec![
         tokio::spawn(peer::accept(agent.clone(), tcp)),
         tokio::spawn(peer::pump(agent.clone())),
@@ -135,7 +136,11 @@ impl Agent {
         host: &str,
         addr: &str,
     ) {
-        lock(&self.peers).insert(host.into(), addr.into());
+        let new = lock(&self.peers).insert(host.into(), addr.into()).is_none();
+        if new {
+            // a peer learned later gets our record at once, not at the next local change
+            let _ = self.publish();
+        }
         self.kick.notify_one();
     }
 
@@ -237,22 +242,28 @@ pub fn uuid7() -> String {
     format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
 }
 
-/// `pid` followed by its ancestors, nearest first, with each process's command name.
-pub fn ancestry(pid: i64) -> Vec<(i64, String)> {
-    let out = std::process::Command::new("ps").args(["-axo", "pid=,ppid=,comm="]).output();
-    let Ok(out) = out else { return vec![] };
-    let mut procs: HashMap<i64, (i64, String)> = HashMap::new();
+/// pid -> (ppid, start time, command name) for every process.
+pub fn processes() -> HashMap<i64, (i64, String, String)> {
+    let out = std::process::Command::new("ps").args(["-axo", "pid=,ppid=,lstart=,comm="]).output();
+    let mut procs = HashMap::new();
+    let Ok(out) = out else { return procs };
     for l in String::from_utf8_lossy(&out.stdout).lines() {
-        let mut it = l.split_whitespace();
-        if let (Some(p), Some(pp)) = (it.next().and_then(|x| x.parse().ok()), it.next().and_then(|x| x.parse().ok())) {
-            procs.insert(p, (pp, it.collect::<Vec<_>>().join(" ")));
+        let f: Vec<&str> = l.split_whitespace().collect();
+        if let (true, Some(p), Some(pp)) = (f.len() > 7, f.first().and_then(|x| x.parse().ok()), f.get(1).and_then(|x| x.parse().ok())) {
+            procs.insert(p, (pp, f[2..7].join(" "), f[7..].join(" ")));
         }
     }
-    let mut chain = vec![];
+    procs
+}
+
+/// `pid` followed by its ancestors, nearest first: `(pid, start time, command name)`.
+pub fn ancestry(pid: i64) -> Vec<(i64, String, String)> {
+    let procs = processes();
+    let mut chain: Vec<(i64, String, String)> = vec![];
     let mut cur = pid;
-    while let Some((pp, comm)) = procs.get(&cur) {
-        chain.push((cur, comm.clone()));
-        if *pp <= 1 || chain.len() > 64 || chain.iter().any(|(p, _)| p == pp) {
+    while let Some((pp, started, comm)) = procs.get(&cur) {
+        chain.push((cur, started.clone(), comm.clone()));
+        if *pp <= 1 || chain.len() > 64 || chain.iter().any(|c| c.0 == *pp) {
             break;
         }
         cur = *pp;

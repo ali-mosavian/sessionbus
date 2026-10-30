@@ -10,7 +10,7 @@ use tokio::{
     time::{Duration, Instant, timeout},
 };
 
-use super::{Agent, ancestry, store, uuid7};
+use super::{Agent, ancestry, processes, store, uuid7};
 use crate::db::{BusErr, Res, now};
 
 pub async fn accept(
@@ -56,30 +56,31 @@ fn str_<'a>(
 }
 
 /// The session behind this connection: the one recorded for the nearest
-/// ancestor of the caller, or a new session tied to the caller's parent.
+/// ancestor of the caller (`chain`, from `ancestry`), or a new session tied to the caller's parent.
 fn caller(
     agent: &Agent,
-    pid: Option<i64>,
+    chain: &[(i64, String, String)],
     req: &Value,
 ) -> Res<String> {
-    let mut db = agent.db();
+    let db = agent.db();
     if agent.cfg.trust_clients {
         if let Some(s) = req["session"].as_str() {
             store::touch_session(&db, s)?;
             return Ok(s.into());
         }
     }
-    let pid = pid.ok_or_else(|| BusErr::new("unidentified", "cannot tell which process is calling"))?;
-    let chain = ancestry(pid);
-    let pids: Vec<i64> = chain.iter().map(|c| c.0).collect();
-    if let Some(s) = store::session_for_chain(&db, &pids)? {
+    if chain.is_empty() {
+        return Err(BusErr::new("unidentified", "cannot tell which process is calling"));
+    }
+    let keys: Vec<(i64, String)> = chain.iter().map(|c| (c.0, c.1.clone())).collect();
+    if let Some(s) = store::session_for_chain(&db, &keys)? {
         store::touch_session(&db, &s)?;
         return Ok(s);
     }
     let s = format!("auto-{}", uuid7());
     store::touch_session(&db, &s)?;
-    store::bind_pid(&db, *pids.get(1).unwrap_or(&pid), &s)?;
-    let _ = &mut db;
+    let anchor = chain.get(1).unwrap_or(&chain[0]);
+    store::bind_pid(&db, anchor.0, &anchor.1, &s)?;
     Ok(s)
 }
 
@@ -226,8 +227,8 @@ fn send(
             state: if local { "delivered" } else { "queued" }.into(),
         };
         if local {
-            store::deliver(&agent.db(), &env)?;
             store::queue_sent(&mut agent.db(), &row, session, None)?;
+            store::deliver(&agent.db(), &env)?;
             agent.wake_inbox();
         } else {
             let payload = serde_json::to_string(&env)?;
@@ -288,21 +289,28 @@ async fn handle(
     req: &Value,
 ) -> Res<Value> {
     let op = str_(req, "op")?;
+    let claimed = agent.cfg.trust_clients && req["session"].is_string();
+    // `ps` takes a while: run it before taking the database lock and off the async threads
+    let chain = match pid {
+        Some(p) if !claimed || op == "register" => tokio::task::spawn_blocking(move || ancestry(p)).await.unwrap_or_default(),
+        _ => vec![],
+    };
     if op == "register" {
         // identity comes from the hook's process tree, not from the request, unless tests allow it
         let session = str_(req, "session")?;
         let anchor = match (agent.cfg.trust_clients, req["anchor"].as_i64()) {
-            (true, Some(a)) => a,
+            (true, Some(a)) => (a, req["anchor_started"].as_str().unwrap_or("").to_string()),
             _ => {
-                let chain = ancestry(pid.ok_or_else(|| BusErr::new("unidentified", "no peer pid"))?);
-                chain.iter().skip(1).find(|c| c.1.contains("claude") || c.1.ends_with("node")).or(chain.get(1)).map_or(0, |c| c.0)
+                let a = chain.iter().skip(1).find(|c| c.2.contains("claude") || c.2.ends_with("node")).or(chain.get(1));
+                let a = a.ok_or_else(|| BusErr::new("unidentified", "cannot tell which process is calling"))?;
+                (a.0, a.1.clone())
             }
         };
-        let old = store::register_session(&mut agent.db(), session, req["cwd"].as_str().unwrap_or(""), anchor)?;
+        let old = store::register_session(&mut agent.db(), session, req["cwd"].as_str().unwrap_or(""), (anchor.0, &anchor.1))?;
         agent.publish()?;
         return Ok(json!({"session": session, "replaced": old}));
     }
-    let session = caller(agent, pid, req)?;
+    let session = caller(agent, &chain, req)?;
     match op {
         "whoami" => {
             let db = agent.db();
@@ -319,7 +327,9 @@ async fn handle(
             if alias.contains(['@', '#', '/']) || alias.contains(char::is_whitespace) || alias.len() > 64 {
                 return Err(BusErr::bad_request("alias may not contain whitespace, @, # or /"));
             }
-            store::set_alias(&mut agent.db(), project, &session, alias)?;
+            let procs = tokio::task::spawn_blocking(processes).await.unwrap_or_default();
+            let dead = |ps: &[(i64, String)]| !procs.is_empty() && ps.iter().all(|(p, st)| procs.get(p).is_none_or(|x| &x.1 != st));
+            store::set_alias(&mut agent.db(), project, &session, alias, &dead)?;
             agent.publish()?;
             Ok(json!({"session": session, "alias": alias}))
         }

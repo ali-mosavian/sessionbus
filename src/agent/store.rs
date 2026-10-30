@@ -50,7 +50,7 @@ pub fn open(path: &Path) -> Res<Connection> {
     c.execute_batch(
         "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON; PRAGMA busy_timeout=5000;
          CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, cwd TEXT, started INTEGER NOT NULL, last_seen INTEGER NOT NULL);
-         CREATE TABLE IF NOT EXISTS pids(pid INTEGER PRIMARY KEY, session TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS pids(pid INTEGER PRIMARY KEY, started TEXT NOT NULL, session TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS aliases(project TEXT NOT NULL, alias TEXT NOT NULL, session TEXT NOT NULL,
              PRIMARY KEY(project, alias), UNIQUE(project, session));
          CREATE TABLE IF NOT EXISTS projects(name TEXT PRIMARY KEY);
@@ -82,7 +82,7 @@ pub fn register_session(
     c: &mut Connection,
     session: &str,
     cwd: &str,
-    anchor: i64,
+    anchor: (i64, &str),
 ) -> Res<Option<String>> {
     let tx = c.transaction()?;
     let t = now();
@@ -91,13 +91,14 @@ pub fn register_session(
          ON CONFLICT(id) DO UPDATE SET cwd=?2, last_seen=?3",
         params![session, cwd, t],
     )?;
+    // the same pid with another start time is a different process that reused the number
     let old: Option<String> = tx
-        .query_row("SELECT session FROM pids WHERE pid=?1", [anchor], |r| r.get(0))
+        .query_row("SELECT session FROM pids WHERE pid=?1 AND started=?2", params![anchor.0, anchor.1], |r| r.get(0))
         .optional()?
         .filter(|p: &String| p != session);
     tx.execute(
-        "INSERT INTO pids(pid, session) VALUES(?1, ?2) ON CONFLICT(pid) DO UPDATE SET session=?2",
-        params![anchor, session],
+        "INSERT INTO pids(pid, started, session) VALUES(?1, ?2, ?3) ON CONFLICT(pid) DO UPDATE SET started=?2, session=?3",
+        params![anchor.0, anchor.1, session],
     )?;
     if let Some(old) = &old {
         for sql in [
@@ -116,10 +117,13 @@ pub fn register_session(
 /// caller's ancestry, nearest first).
 pub fn session_for_chain(
     c: &Connection,
-    chain: &[i64],
+    chain: &[(i64, String)],
 ) -> Res<Option<String>> {
-    for pid in chain {
-        if let Some(s) = c.query_row("SELECT session FROM pids WHERE pid=?1", [pid], |r| r.get(0)).optional()? {
+    for (pid, started) in chain {
+        if let Some(s) = c
+            .query_row("SELECT session FROM pids WHERE pid=?1 AND started=?2", params![pid, started], |r| r.get(0))
+            .optional()?
+        {
             return Ok(Some(s));
         }
     }
@@ -141,9 +145,13 @@ pub fn touch_session(
 pub fn bind_pid(
     c: &Connection,
     pid: i64,
+    started: &str,
     session: &str,
 ) -> Res<()> {
-    c.execute("INSERT INTO pids(pid, session) VALUES(?1, ?2) ON CONFLICT(pid) DO UPDATE SET session=?2", params![pid, session])?;
+    c.execute(
+        "INSERT INTO pids(pid, started, session) VALUES(?1, ?2, ?3) ON CONFLICT(pid) DO UPDATE SET started=?2, session=?3",
+        params![pid, started, session],
+    )?;
     Ok(())
 }
 
@@ -159,13 +167,22 @@ pub fn set_alias(
     project: &str,
     session: &str,
     alias: &str,
+    dead: &dyn Fn(&[(i64, String)]) -> bool,
 ) -> Res<()> {
     let tx = c.transaction()?;
     let owner: Option<String> = tx
         .query_row("SELECT session FROM aliases WHERE project=?1 AND alias=?2", params![project, alias], |r| r.get(0))
         .optional()?;
-    if owner.is_some_and(|o| o != session) {
-        return Err(BusErr::new("name_in_use", format!("alias \"{alias}\" is taken by another session in {project}")));
+    if let Some(o) = owner.filter(|o| o != session) {
+        // a restarted Claude is a new session: its predecessor's name is free once that process is gone
+        let procs: Vec<(i64, String)> = tx
+            .prepare("SELECT pid, started FROM pids WHERE session=?1")?
+            .query_map([&o], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        if procs.is_empty() || !dead(&procs) {
+            return Err(BusErr::new("name_in_use", format!("alias \"{alias}\" is taken by another session in {project}")));
+        }
+        tx.execute("DELETE FROM aliases WHERE project=?1 AND alias=?2", params![project, alias])?;
     }
     tx.execute("DELETE FROM aliases WHERE project=?1 AND session=?2", params![project, session])?;
     tx.execute("INSERT INTO aliases(project, alias, session) VALUES(?1, ?2, ?3)", params![project, alias, session])?;
@@ -314,24 +331,47 @@ pub fn expire(c: &Connection) -> Res<usize> {
     Ok(n)
 }
 
-/// Drops read messages and old status rows after `keep` seconds.
+/// Drops read messages and old status rows after `keep` seconds, and sessions
+/// unseen for `idle` seconds with their names, subscriptions and process records.
 pub fn purge(
     c: &Connection,
     keep: i64,
+    idle: i64,
 ) -> Res<()> {
     let before = now() - keep;
     c.execute("DELETE FROM inbox WHERE read_at IS NOT NULL AND read_at<=?1", [before])?;
     c.execute("DELETE FROM sent WHERE created<=?1", [before])?;
+    let gone = now() - idle;
+    for t in ["aliases", "subs", "pids"] {
+        c.execute(&format!("DELETE FROM {t} WHERE session IN (SELECT id FROM sessions WHERE last_seen<=?1)"), [gone])?;
+    }
+    c.execute("DELETE FROM sessions WHERE last_seen<=?1 AND id NOT IN (SELECT to_session FROM inbox WHERE read_at IS NULL)", [gone])?;
     Ok(())
 }
 
+/// `read` always wins (a receipt can outlive an `expired` mark when the ack was lost);
+/// anything else only moves a message that is still queued.
 pub fn set_sent_state(
     c: &Connection,
     id: &str,
     state: &str,
 ) -> Res<()> {
-    c.execute("UPDATE sent SET state=?2 WHERE id=?1 AND state NOT IN ('read', 'expired')", params![id, state])?;
+    if state == "read" {
+        c.execute("UPDATE sent SET state='read' WHERE id=?1 AND state!='read'", [id])?;
+    } else {
+        c.execute("UPDATE sent SET state=?2 WHERE id=?1 AND state='queued'", params![id, state])?;
+    }
     Ok(())
+}
+
+/// The receiver refused the message for good.
+pub fn outbox_reject(
+    c: &Connection,
+    host: &str,
+    id: &str,
+) -> Res<()> {
+    c.execute("DELETE FROM outbox WHERE id=?1 AND kind='msg' AND to_host=?2", params![id, host])?;
+    set_sent_state(c, id, "rejected")
 }
 
 pub fn sent_status(
