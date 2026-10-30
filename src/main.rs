@@ -54,6 +54,11 @@ async fn run_agent(mut args: Vec<String>) {
         cfg.listen = l;
     }
     cfg.advertise = opt(&mut args, "--advertise");
+    // for tests: local clients may name their own session
+    if let Some(i) = args.iter().position(|a| a == "--trust-clients") {
+        args.remove(i);
+        cfg.trust_clients = true;
+    }
     while let Some(p) = opt(&mut args, "--peer") {
         let (n, a) = p.split_once('=').unwrap_or_else(|| die("--peer wants NAME=ADDR"));
         cfg.peers.push((n.into(), a.into()));

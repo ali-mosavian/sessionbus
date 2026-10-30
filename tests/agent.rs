@@ -316,3 +316,20 @@ async fn caller_is_identified_by_process_ancestry() {
     let w = ask(json!({"op": "whoami", "session": "forged"})).await;
     assert_eq!(w["session"], "S-from-hook");
 }
+
+/// Every Stop hook starts a waiter; an older one still running would wake Claude
+/// with the same messages twice. A newer exclusive wait must retire it.
+#[tokio::test]
+async fn newer_exclusive_wait_supersedes_older() {
+    let a = host("A").await;
+    a.ok("x", json!({"op": "addproject", "name": "p"})).await;
+    a.setup("s1", "alice").await;
+    let old = a.ok("s1", json!({"op": "wait", "exclusive": true, "timeout_ms": 5000}));
+    let new = async {
+        sleep(Duration::from_millis(100)).await;
+        a.ok("s1", json!({"op": "wait", "exclusive": true, "timeout_ms": 300})).await
+    };
+    let (old, new) = tokio::join!(old, new);
+    assert_eq!(old["superseded"], true);
+    assert_eq!(new["superseded"], Value::Null);
+}

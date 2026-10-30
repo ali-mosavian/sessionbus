@@ -78,6 +78,7 @@ pub struct Agent {
     kick: Notify,
     inbox: watch::Sender<u64>,
     version: AtomicI64,
+    waiters: Mutex<HashMap<String, u64>>,
 }
 
 /// A running agent; dropping it stops its tasks.
@@ -113,6 +114,7 @@ pub async fn start(cfg: Config) -> Res<Running> {
         kick: Notify::new(),
         inbox: watch::channel(0).0,
         version: AtomicI64::new(0),
+        waiters: Mutex::new(HashMap::new()),
     });
     let tasks = vec![
         tokio::spawn(peer::accept(agent.clone(), tcp)),
@@ -145,6 +147,28 @@ impl Agent {
 
     pub(crate) fn peer_hosts(&self) -> Vec<String> {
         lock(&self.peers).keys().cloned().collect()
+    }
+
+    /// Makes a new exclusive waiter for `session`; older ones see they were superseded.
+    pub(crate) fn new_waiter(
+        &self,
+        session: &str,
+    ) -> u64 {
+        let n = {
+            let mut w = lock(&self.waiters);
+            let n = w.entry(session.into()).or_insert(0);
+            *n += 1;
+            *n
+        };
+        self.wake_inbox();
+        n
+    }
+
+    pub(crate) fn current_waiter(
+        &self,
+        session: &str,
+    ) -> u64 {
+        lock(&self.waiters).get(session).copied().unwrap_or(0)
     }
 
     pub(crate) fn wake_inbox(&self) {

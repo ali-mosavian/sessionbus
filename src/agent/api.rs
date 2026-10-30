@@ -353,8 +353,12 @@ async fn handle(
         "peek" | "wait" => {
             let project = req["project"].as_str();
             let mut rx = agent.inbox.subscribe();
+            let mine = (op == "wait" && req["exclusive"] == true).then(|| agent.new_waiter(&session));
             let deadline = Instant::now() + Duration::from_millis(req["timeout_ms"].as_u64().unwrap_or(0).min(600_000));
             loop {
+                if mine.is_some_and(|n| n != agent.current_waiter(&session)) {
+                    return Ok(json!({"messages": [], "superseded": true}));
+                }
                 let m = store::pending(&agent.db(), &session, project)?;
                 if !m.is_empty() || op == "peek" || Instant::now() >= deadline {
                     return Ok(json!({"messages": m}));
