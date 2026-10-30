@@ -123,6 +123,39 @@ async fn local_call(
     }
 }
 
+/// Says what works: tailscale, the local agent, and which peers it reached.
+async fn doctor() {
+    use sessionbus::agent::tailnet;
+    match tailnet::find_cli().map(|c| tailnet::status(&c)) {
+        None => println!("tailscale: not found (agents can still be linked with --peer)"),
+        Some(Err(e)) => println!("tailscale: {e}"),
+        Some(Ok(st)) => {
+            println!("tailscale: running as {}; {} other device(s) of yours", st.me.host, st.peers.len());
+            st.peers.iter().for_each(|p| println!("  {} {}", p.host, if p.online { "online" } else { "offline" }));
+        }
+    }
+    let sock = env::var("SESSIONBUS_SOCK").map_or_else(|_| home_dir().join("agent.sock"), Into::into);
+    let reply = async {
+        use tokio::{io::{AsyncBufReadExt, AsyncWriteExt, BufReader}, net::UnixStream};
+        let s = UnixStream::connect(&sock).await.ok()?;
+        let (r, mut w) = s.into_split();
+        w.write_all(b"{\"op\":\"peers\"}\n").await.ok()?;
+        let mut line = String::new();
+        BufReader::new(r).read_line(&mut line).await.ok()?;
+        serde_json::from_str::<Value>(&line).ok()
+    }
+    .await;
+    let Some(r) = reply.filter(|r| r["ok"] == true) else {
+        println!("agent: not running at {} (start it with `sessionbus agent --tailscale`)", sock.display());
+        exit(1);
+    };
+    println!("agent: running as {}", r["host"].as_str().unwrap_or("?"));
+    for p in r["peers"].as_array().into_iter().flatten() {
+        let seen = if p["in_directory"] == true { "reached" } else { "never reached" };
+        println!("  peer {} {} ({seen}, {} queued)", p["host"].as_str().unwrap_or("?"), p["addr"].as_str().unwrap_or("?"), p["queued"]);
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let mut args: Vec<String> = env::args().skip(1).collect();
@@ -133,6 +166,9 @@ async fn main() {
     let cmd = args.remove(0);
     if cmd == "agent" {
         return run_agent(args).await;
+    }
+    if cmd == "doctor" {
+        return doctor().await;
     }
     if cmd == "hook" || cmd == "call" {
         return local_call(&cmd, args).await;

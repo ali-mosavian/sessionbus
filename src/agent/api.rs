@@ -323,6 +323,18 @@ async fn handle(
             agent.publish()?;
             Ok(json!({"session": session, "alias": alias}))
         }
+        "peers" => {
+            let db = agent.db();
+            let known: std::collections::HashSet<_> = store::directory(&db)?.into_iter().map(|d| d.0).collect();
+            let queued: std::collections::HashMap<_, _> = store::queued_by_host(&db)?.into_iter().collect();
+            let mut hosts = agent.peer_hosts();
+            hosts.sort();
+            let peers: Vec<Value> = hosts
+                .iter()
+                .map(|h| json!({"host": h, "addr": agent.peer_addr(h), "in_directory": known.contains(h), "queued": queued.get(h).copied().unwrap_or(0)}))
+                .collect();
+            Ok(json!({"host": agent.cfg.host, "peers": peers}))
+        }
         "projects" => Ok(json!({"projects": universe(agent)?.2})),
         "addproject" => {
             store::add_project(&agent.db(), str_(req, "name")?)?;

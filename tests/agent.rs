@@ -159,6 +159,8 @@ async fn message_waits_in_outbox_until_peer_returns() {
     assert_eq!(sent["sent"][0]["state"], "queued");
     sleep(Duration::from_millis(300)).await;
     assert_eq!(a.state("sa", &id).await, "queued");
+    let peers = a.ok("sa", json!({"op": "peers"})).await;
+    assert_eq!((peers["peers"][0]["host"].as_str(), peers["peers"][0]["queued"].as_i64()), (Some("B"), Some(1)));
     let b = host_in("B", bdir, baddr, true).await;
     wait_until(|| async { a.state("sa", &id).await == "delivered" }).await;
     let m = b.inbox("sb").await;

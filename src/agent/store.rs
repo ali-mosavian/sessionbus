@@ -276,6 +276,11 @@ pub fn hosts_with_outbox(c: &Connection) -> Res<Vec<String>> {
     Ok(s.query_map([now()], |r| r.get(0))?.collect::<Result<_, _>>()?)
 }
 
+pub fn queued_by_host(c: &Connection) -> Res<Vec<(String, i64)>> {
+    let mut s = c.prepare("SELECT to_host, COUNT(*) FROM outbox WHERE kind='msg' AND expires>?1 GROUP BY to_host")?;
+    Ok(s.query_map([now()], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?)
+}
+
 /// Removes an acked item, unless it was replaced while in flight (a newer
 /// directory record must stay queued).
 pub fn outbox_done(
