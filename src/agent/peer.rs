@@ -19,12 +19,15 @@ pub async fn accept(
     agent: Arc<Agent>,
     l: TcpListener,
 ) {
+    // owned here so that stopping the accept task also ends the connections it served
+    let mut conns = tokio::task::JoinSet::new();
     loop {
         let Ok((s, remote)) = l.accept().await else { continue };
         if !(agent.cfg.auth)(remote.ip()) {
             continue;
         }
-        tokio::spawn(serve(agent.clone(), s));
+        conns.spawn(serve(agent.clone(), s));
+        while conns.try_join_next().is_some() {}
     }
 }
 

@@ -17,9 +17,11 @@ pub async fn accept(
     agent: Arc<Agent>,
     l: UnixListener,
 ) {
+    let mut conns = tokio::task::JoinSet::new();
     loop {
         let Ok((s, _)) = l.accept().await else { continue };
-        tokio::spawn(serve(agent.clone(), s));
+        conns.spawn(serve(agent.clone(), s));
+        while conns.try_join_next().is_some() {}
     }
 }
 

@@ -21,7 +21,7 @@ export interface TestAgent {
   restart(): Promise<void>;
 }
 
-const freePort = () =>
+export const freePort = () =>
   new Promise<number>((res) => {
     const s = createServer().listen(0, "127.0.0.1", () => {
       const p = (s.address() as { port: number }).port;

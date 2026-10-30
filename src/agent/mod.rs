@@ -95,6 +95,16 @@ impl Drop for Running {
     }
 }
 
+impl Running {
+    /// Stops the agent and waits until its listeners and connections are gone.
+    pub async fn stop(mut self) {
+        self.tasks.iter().for_each(|t| t.abort());
+        for t in std::mem::take(&mut self.tasks) {
+            let _ = t.await;
+        }
+    }
+}
+
 pub async fn start(cfg: Config) -> Res<Running> {
     std::fs::create_dir_all(&cfg.dir)?;
     let db = store::open(&cfg.dir.join("agent.db"))?;

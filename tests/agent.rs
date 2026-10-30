@@ -90,8 +90,7 @@ impl Host {
     }
 
     async fn stop(self) -> (PathBuf, String) {
-        drop(self.run);
-        sleep(Duration::from_millis(50)).await;
+        self.run.stop().await;
         (self.dir, self.listen)
     }
 }

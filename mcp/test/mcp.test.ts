@@ -10,7 +10,7 @@ import { after, before, test } from "node:test";
 import { call } from "../src/agent.ts";
 import { runtime, serve } from "../src/server.ts";
 import { main as waitHook } from "../src/wait.ts";
-import { startAgent, type TestAgent } from "./agentproc.ts";
+import { freePort, startAgent, type TestAgent } from "./agentproc.ts";
 
 let agent: TestAgent;
 before(async () => {
@@ -21,8 +21,11 @@ after(() => agent.stop());
 
 /** The ack follows the reply on the same connection, so effects of a read show a moment later. */
 async function eventually(f: () => Promise<boolean>) {
-  for (let i = 0; i < 50 && !(await f()); i++) await new Promise((r) => setTimeout(r, 20));
-  assert.ok(await f(), "condition not reached");
+  for (let i = 0; i < 150; i++) {
+    if (await f()) return; // f may consume what it reads, so it is called once more only if it failed
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.fail("condition not reached");
 }
 
 /** An MCP session speaking as `session`; `rpc` returns the text of a tool reply. */
@@ -133,7 +136,7 @@ test("the wake hook exits quietly when no agent runs", async () => {
 
 /** Two real agents on two "hosts": a message sent while the other host is down is delivered, once, when it returns. */
 test("a message to a host that is down is delivered when the host comes back", async () => {
-  const port2 = 43000 + Math.floor(Math.random() * 2000);
+  const port2 = await freePort();
   const h2 = await startAgent("h2", [], port2);
   const h1 = await startAgent("h1", [`h2=127.0.0.1:${port2}`]);
   for (const a of [h1, h2]) await call({ op: "addproject", name: "t" }, { sock: a.sock, session: "setup" });
