@@ -506,3 +506,17 @@ async fn starting_agent_announces_itself_to_known_peers() {
     })
     .await;
 }
+
+/// On tinytim Claude's process is named by a bare version number and its hook runs under
+/// `sh -c`: the hook was bound to that short-lived shell, the MCP (a sibling) never matched it,
+/// and every session got a second, `auto-` identity, so wake hooks waited on the wrong inbox.
+#[test]
+fn anchor_is_the_nearest_non_shell_ancestor() {
+    let p = |pid: i64, comm: &str| (pid, "t".to_string(), comm.to_string());
+    let hook = [p(30, "node"), p(20, "/bin/sh"), p(10, "2.1.309-537ebbf12df5"), p(2, "server")];
+    assert_eq!(agent::anchor(&hook).unwrap().0, 10);
+    let direct = [p(30, "node"), p(10, "claude")];
+    assert_eq!(agent::anchor(&direct).unwrap().0, 10);
+    let mcp = [p(31, "node"), p(11, "-bash"), p(10, "claude")];
+    assert_eq!(agent::anchor(&mcp).unwrap().0, 10);
+}

@@ -270,3 +270,15 @@ pub fn ancestry(pid: i64) -> Vec<(i64, String, String)> {
     }
     chain
 }
+
+const SHELLS: [&str; 8] = ["sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh"];
+
+/// The process that stands for the Claude session: the nearest ancestor of the caller that
+/// is not a shell. A hook and the MCP both descend from it, but the hook often runs under a
+/// short-lived `sh -c`, and Claude's own process name varies (`claude`, a bare version number).
+pub fn anchor(chain: &[(i64, String, String)]) -> Option<&(i64, String, String)> {
+    chain.iter().skip(1).find(|c| {
+        let name = c.2.rsplit('/').next().unwrap_or("").trim_start_matches('-');
+        !SHELLS.contains(&name)
+    })
+}

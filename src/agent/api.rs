@@ -10,7 +10,7 @@ use tokio::{
     time::{Duration, Instant, timeout},
 };
 
-use super::{Agent, ancestry, processes, store, uuid7};
+use super::{Agent, ancestry, anchor, processes, store, uuid7};
 use crate::db::{BusErr, Res, now};
 
 pub async fn accept(
@@ -79,7 +79,7 @@ fn caller(
     }
     let s = format!("auto-{}", uuid7());
     store::touch_session(&db, &s)?;
-    let anchor = chain.get(1).unwrap_or(&chain[0]);
+    let anchor = anchor(chain).unwrap_or(&chain[0]);
     store::bind_pid(&db, anchor.0, &anchor.1, &s)?;
     Ok(s)
 }
@@ -301,7 +301,7 @@ async fn handle(
         let anchor = match (agent.cfg.trust_clients, req["anchor"].as_i64()) {
             (true, Some(a)) => (a, req["anchor_started"].as_str().unwrap_or("").to_string()),
             _ => {
-                let a = chain.iter().skip(1).find(|c| c.2.contains("claude") || c.2.ends_with("node")).or(chain.get(1));
+                let a = anchor(&chain);
                 let a = a.ok_or_else(|| BusErr::new("unidentified", "cannot tell which process is calling"))?;
                 (a.0, a.1.clone())
             }
