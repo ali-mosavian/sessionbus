@@ -45,13 +45,31 @@ fn hostname() -> String {
 async fn run_agent(mut args: Vec<String>) {
     use sessionbus::agent::{Config, start};
     let dir = opt(&mut args, "--dir").map_or_else(home_dir, Into::into);
-    let host = opt(&mut args, "--host").unwrap_or_else(hostname);
+    let tailscale = args.iter().position(|a| a == "--tailscale").map(|i| args.remove(i)).is_some();
+    let port = opt(&mut args, "--port").unwrap_or("8788".into());
+    let mut host = opt(&mut args, "--host");
+    let mut listen = opt(&mut args, "--listen");
+    let mut tail = None;
+    if tailscale {
+        use sessionbus::agent::tailnet;
+        let cli = tailnet::find_cli().unwrap_or_else(|| die("tailscale not found"));
+        let st = tailnet::status(&cli).unwrap_or_else(|e| die(e));
+        let ip = st.me.ips.iter().find(|i| i.is_ipv4()).unwrap_or_else(|| die("no tailnet IPv4 address"));
+        host.get_or_insert(st.me.host.clone());
+        listen.get_or_insert(format!("{ip}:{port}"));
+        tail = Some((cli, tailnet::auth(&st), st));
+    }
+    let host = host.unwrap_or_else(hostname);
     if host.is_empty() {
         die("cannot tell this host's name; pass --host");
     }
     let mut cfg = Config::new(&host, dir);
-    if let Some(l) = opt(&mut args, "--listen") {
+    if let Some(l) = listen {
         cfg.listen = l;
+    }
+    if let Some((_, (auth, _), st)) = &tail {
+        cfg.auth = auth.clone();
+        cfg.peers = st.peers.iter().filter_map(|p| Some((p.host.clone(), format!("{}:{port}", p.ips.iter().find(|i| i.is_ipv4())?)))).collect();
     }
     cfg.advertise = opt(&mut args, "--advertise");
     // for tests: local clients may name their own session
@@ -67,6 +85,11 @@ async fn run_agent(mut args: Vec<String>) {
         die(format!("unexpected {args:?}"));
     }
     let run = start(cfg).await.unwrap_or_else(|e| die(e));
+    if let Some((cli, (_, allowed), _)) = tail {
+        let _watch = sessionbus::agent::tailnet::watch(run.agent.clone(), cli, allowed, port.parse().unwrap_or(8788));
+        eprintln!("sessionbus agent {host}: peers on {}, sessions on {}", run.addr, run.agent.cfg.sock.display());
+        std::future::pending::<()>().await;
+    }
     eprintln!("sessionbus agent {host}: peers on {}, sessions on {}", run.addr, run.agent.cfg.sock.display());
     std::future::pending::<()>().await;
 }

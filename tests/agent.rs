@@ -333,3 +333,22 @@ async fn newer_exclusive_wait_supersedes_older() {
     assert_eq!(old["superseded"], true);
     assert_eq!(new["superseded"], Value::Null);
 }
+
+const TAILNET: &str = r#"{"BackendState":"Running",
+ "Self":{"HostName":"tinytim","DNSName":"tinytim.tailf2b15.ts.net.","TailscaleIPs":["100.70.132.20","fd7a::1"],"UserID":1,"Online":true},
+ "Peer":{"a":{"HostName":"MacBook Air (3)","DNSName":"macbook-air-3.tailf2b15.ts.net.","TailscaleIPs":["100.72.106.35"],"UserID":1,"Online":false},
+         "b":{"HostName":"stranger","DNSName":"stranger.other.ts.net.","TailscaleIPs":["100.1.2.3"],"UserID":2,"Online":true}}}"#;
+
+/// Hostnames like "MacBook Air (3)" are not usable as addresses, and a device of another
+/// user on a shared tailnet must not be let in.
+#[test]
+fn tailnet_peers_are_the_users_own_devices_by_dns_label() {
+    use sessionbus::agent::tailnet;
+    let st = tailnet::parse(TAILNET).unwrap();
+    assert_eq!(st.me.host, "tinytim");
+    assert_eq!(st.peers.iter().map(|p| p.host.as_str()).collect::<Vec<_>>(), ["macbook-air-3"]);
+    let (auth, _) = tailnet::auth(&st);
+    assert!(auth("100.72.106.35".parse().unwrap()));
+    assert!(!auth("100.1.2.3".parse().unwrap()));
+    assert!(tailnet::parse(&TAILNET.replace("Running", "Stopped")).is_err());
+}

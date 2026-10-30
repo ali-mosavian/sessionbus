@@ -5,6 +5,7 @@
 mod api;
 mod peer;
 pub mod store;
+pub mod tailnet;
 
 use std::{
     collections::HashMap,
