@@ -126,3 +126,29 @@ test("the wake hook exits quietly when no agent runs", async () => {
   const r = await waitHook({ session_id: "s-i" }, { sock: "/tmp/sb-nonexistent.sock" });
   assert.deepEqual(r, { code: 0 });
 });
+
+/** Two real agents on two "hosts": a message sent while the other host is down is delivered, once, when it returns. */
+test("a message to a host that is down is delivered when the host comes back", async () => {
+  const port2 = 43000 + Math.floor(Math.random() * 2000);
+  const h2 = await startAgent("h2", [], port2);
+  const h1 = await startAgent("h1", [`h2=127.0.0.1:${port2}`]);
+  for (const a of [h1, h2]) await call({ op: "addproject", name: "t" }, { sock: a.sock, session: "setup" });
+  try {
+    const [alice, bob] = [mcp("e-a", h1.sock), mcp("e-b", h2.sock)];
+    await alice.tool("ListAgents", { project: "t", as: "alice" });
+    await bob.tool("ListAgents", { project: "t", as: "bob" });
+    await eventually(async () => /bob@h2/.test((await alice.tool("ListAgents", { project: "t" })).text));
+    h2.stop();
+    const sent = await alice.tool("SendMessage", { project: "t", to: "bob", message: "while you were out" });
+    assert.match(sent.text, /bob@h2 \(id [0-9a-f-]{36}, queued\)/);
+    const id = sent.text.match(/id ([0-9a-f-]{36})/)![1];
+    await h2.restart();
+    await eventually(async () => /while you were out/.test((await bob.tool("ReadNotifications", { project: "t" })).text));
+    await eventually(async () => /bob@h2: read/.test((await alice.tool("MessageStatus", { project: "t", ids: [id] })).text));
+    assert.equal((await bob.tool("ReadNotifications", { project: "t" })).text, "No pending notifications.");
+    await Promise.all([alice.close(), bob.close()]);
+  } finally {
+    h1.stop();
+    h2.stop();
+  }
+});

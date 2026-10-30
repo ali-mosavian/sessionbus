@@ -72,6 +72,9 @@ async fn run_agent(mut args: Vec<String>) {
         cfg.peers = st.peers.iter().filter_map(|p| Some((p.host.clone(), format!("{}:{port}", p.ips.iter().find(|i| i.is_ipv4())?)))).collect();
     }
     cfg.advertise = opt(&mut args, "--advertise");
+    if let Some(ms) = opt(&mut args, "--retry-ms") {
+        cfg.retry = Duration::from_millis(ms.parse().unwrap_or_else(|_| die("bad number")));
+    }
     // for tests: local clients may name their own session
     if let Some(i) = args.iter().position(|a| a == "--trust-clients") {
         args.remove(i);
