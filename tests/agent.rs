@@ -552,3 +552,11 @@ async fn list_gives_last_seen_for_sessions_on_other_hosts() {
     })
     .await;
 }
+
+/// Under launchd the macOS Tailscale binary printed a GUI error instead of JSON, and the agent
+/// died with "expected value at line 1 column 1", which names nothing.
+#[test]
+fn tailscale_output_that_is_not_json_is_explained() {
+    let e = sessionbus::agent::tailnet::parse("The Tailscale GUI failed to start: nope").unwrap_err();
+    assert!(e.msg.contains("did not print JSON") && e.msg.contains("GUI failed to start"), "{}", e.msg);
+}

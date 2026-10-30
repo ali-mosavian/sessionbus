@@ -36,7 +36,10 @@ fn node(v: &Value) -> Option<Node> {
 }
 
 pub fn parse(json: &str) -> Res<Status> {
-    let v: Value = serde_json::from_str(json)?;
+    let v: Value = serde_json::from_str(json).map_err(|_| {
+        let head: String = json.trim().chars().take(120).collect();
+        BusErr::new("tailscale", format!("`tailscale status --json` did not print JSON: {head}"))
+    })?;
     if v["BackendState"] != "Running" {
         return Err(BusErr::new("tailscale", format!("tailscale is {}, not Running", v["BackendState"])));
     }
@@ -60,7 +63,8 @@ pub fn find_cli() -> Option<String> {
 }
 
 pub fn status(cli: &str) -> Res<Status> {
-    let out = std::process::Command::new(cli).args(["status", "--json"]).output()?;
+    // the macOS app's binary is a GUI unless told to act as the CLI (launchd starts us without a terminal)
+    let out = std::process::Command::new(cli).env("TAILSCALE_BE_CLI", "1").args(["status", "--json"]).output()?;
     if !out.status.success() {
         return Err(BusErr::new("tailscale", String::from_utf8_lossy(&out.stderr).trim().to_string()));
     }
