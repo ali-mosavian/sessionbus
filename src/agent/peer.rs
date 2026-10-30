@@ -137,7 +137,7 @@ async fn push_to(
                 return None;
             }
             // a request the receiver can never accept would block the queue for ever
-            store::outbox_done(&agent.db(), &it.id, &it.kind).ok()?;
+            store::outbox_done(&agent.db(), host, &it.id, &it.kind, &it.payload).ok()?;
         }
         sleep(Duration::from_millis(1)).await;
     }

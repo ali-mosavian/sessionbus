@@ -57,7 +57,7 @@ pub fn open(path: &Path) -> Res<Connection> {
          CREATE TABLE IF NOT EXISTS subs(project TEXT NOT NULL, topic TEXT NOT NULL, session TEXT NOT NULL,
              PRIMARY KEY(project, topic, session));
          CREATE TABLE IF NOT EXISTS outbox(id TEXT NOT NULL, kind TEXT NOT NULL, to_host TEXT NOT NULL,
-             payload TEXT NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(id, kind));
+             payload TEXT NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(id, kind, to_host));
          CREATE TABLE IF NOT EXISTS sent(id TEXT PRIMARY KEY, project TEXT NOT NULL, from_session TEXT NOT NULL,
              to_session TEXT NOT NULL, to_alias TEXT NOT NULL, to_host TEXT NOT NULL, created INTEGER NOT NULL,
              state TEXT NOT NULL);
@@ -276,12 +276,16 @@ pub fn hosts_with_outbox(c: &Connection) -> Res<Vec<String>> {
     Ok(s.query_map([now()], |r| r.get(0))?.collect::<Result<_, _>>()?)
 }
 
+/// Removes an acked item, unless it was replaced while in flight (a newer
+/// directory record must stay queued).
 pub fn outbox_done(
     c: &Connection,
+    host: &str,
     id: &str,
     kind: &str,
+    payload: &str,
 ) -> Res<()> {
-    c.execute("DELETE FROM outbox WHERE id=?1 AND kind=?2", params![id, kind])?;
+    c.execute("DELETE FROM outbox WHERE id=?1 AND kind=?2 AND to_host=?3 AND payload=?4", params![id, kind, host, payload])?;
     if kind == "msg" {
         c.execute("UPDATE sent SET state='delivered' WHERE id=?1 AND state='queued'", [id])?;
     }
