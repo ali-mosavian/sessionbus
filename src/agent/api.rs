@@ -160,6 +160,15 @@ fn resolve(
     // (host, session, alias)
     let (al, subs, _) = universe(agent)?;
     let alias_of = |s: &str| al.iter().find(|a| a.1 == project && a.3 == s).map_or_else(|| short(s), |a| a.2.clone());
+    if to == "*" {
+        // everyone with an alias in the project; `send` drops the sender
+        let mut seen = std::collections::HashSet::new();
+        return Ok(al
+            .iter()
+            .filter(|a| a.1 == project && seen.insert((a.0.clone(), a.3.clone())))
+            .map(|a| (a.0.clone(), a.3.clone(), a.2.clone()))
+            .collect());
+    }
     if let Some(topic) = to.strip_prefix('#') {
         return Ok(subs
             .iter()
@@ -222,7 +231,10 @@ fn send(
     let body = str_(req, "body")?;
     let ttl = req["ttl_s"].as_i64().unwrap_or(agent.cfg.default_ttl).clamp(1, agent.cfg.max_ttl);
     let who = sender(agent, project, session)?;
-    let targets = resolve(agent, project, to)?;
+    let mut targets = resolve(agent, project, to)?;
+    if to == "*" {
+        targets.retain(|t| t.1 != session);
+    }
     let opt = |k: &str| req[k].as_str().map(String::from);
     let mut sent = vec![];
     for (host, sess, alias) in targets {
@@ -355,7 +367,7 @@ async fn handle(
         "alias" => {
             let (project, alias) = (str_(req, "project")?, str_(req, "alias")?);
             known_project(agent, project)?;
-            if alias.contains(['@', '#', '/']) || alias.contains(char::is_whitespace) || alias.len() > 64 {
+            if alias.contains(['@', '#', '/', '*']) || alias.contains(char::is_whitespace) || alias.len() > 64 {
                 return Err(BusErr::bad_request("alias may not contain whitespace, @, # or /"));
             }
             let procs = tokio::task::spawn_blocking(processes).await.unwrap_or_default();

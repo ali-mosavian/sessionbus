@@ -68,7 +68,7 @@ export const TOOLS: Record<string, Tool> = {
   SendMessage: {
     description:
       "Send a message to another session. `to` is an address from ListAgents (`alias` or `alias@host`), or `#topic` " +
-      "to broadcast to every subscriber of the topic. Your plain text output is NOT visible to other sessions: to " +
+      "to broadcast to every subscriber of the topic, or `*` to reach every other session in the project. Your plain text output is NOT visible to other sessions: to " +
       `communicate you MUST call this tool. A message arrives wrapped as <${TAG} from="...">; **to reply to ` +
       "one, copy its `from` attribute as your `to`**, and set `reply_to` to its `id` so the answer can be " +
       "matched. The send is accepted at once and delivered when the recipient's host is reachable; it is dropped " +
@@ -82,7 +82,7 @@ export const TOOLS: Record<string, Tool> = {
           type: "string",
           pattern: "^[^\\n\\r]*$",
           maxLength: MAX_TO,
-          description: 'Recipient: "alias", "alias@host" or "#topic"',
+          description: 'Recipient: "alias", "alias@host", "#topic" or "*" (everyone else)',
         },
         message: { type: "string", default: "", description: "Plain text message content." },
         summary: {
@@ -108,10 +108,10 @@ export const TOOLS: Record<string, Tool> = {
         ttl_s: ttl_minutes ? ttl_minutes * 60 : undefined,
       });
       const sent = r.sent as Frame[];
-      if (!sent.length) return { text: `NOT delivered: nobody is subscribed to ${to}. Subscribe sessions first (Subscribe), or message them directly.` };
+      if (!sent.length) return { text: to === "*" ? "NOT delivered: no other session in this project." : `NOT delivered: nobody is subscribed to ${to}. Subscribe sessions first (Subscribe), or message them directly.` };
       const rows = sent.map((s) => `${s.to_alias}@${s.to_host} (id ${s.id}, ${s.state})`);
       const waiting = sent.some((s) => s.state === "queued");
-      const who = to.startsWith("#") ? ` ${to} has ${plural(sent.length, "subscriber")}:` : "";
+      const who = to.startsWith("#") ? ` ${to} has ${plural(sent.length, "subscriber")}:` : to === "*" ? ` Broadcast to ${plural(sent.length, "session")}:` : "";
       return { text: `Sent.${who} ${rows.join("; ")}${waiting ? ". queued: that host is not reachable yet; it keeps trying until the message expires." : ""}` };
     },
   },

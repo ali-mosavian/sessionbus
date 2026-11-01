@@ -277,6 +277,23 @@ async fn topic_reaches_subscribers_on_every_host() {
     assert!(a.inbox("sc").await.iter().any(|m| m["topic"] == "news"));
 }
 
+/// `*` reached nobody unless sessions had subscribed to a topic first; it must reach every other
+/// named session in the project, on every host, and never the sender.
+#[tokio::test]
+async fn star_broadcasts_to_everyone_else_without_topics() {
+    let (a, b) = (host("A").await, host("B").await);
+    link(&a, &b).await;
+    a.setup("sa", "alice").await;
+    a.setup("sc", "carol").await;
+    b.setup("sb", "bob").await;
+    wait_until(|| async { a.ok("sa", json!({"op": "list", "project": "p"})).await["sessions"].as_array().unwrap().len() == 3 }).await;
+    let v = a.ok("sa", json!({"op": "send", "project": "p", "to": "*", "body": "hi all"})).await;
+    assert_eq!(v["sent"].as_array().unwrap().len(), 2);
+    wait_until(|| async { b.inbox("sb").await.iter().any(|m| m["body"] == "hi all") }).await;
+    assert!(a.inbox("sc").await.iter().any(|m| m["body"] == "hi all"));
+    assert!(a.inbox("sa").await.is_empty());
+}
+
 /// `/clear` gives the same Claude process a new session id: aliases and unread mail follow.
 #[tokio::test]
 async fn replaced_session_inherits_aliases_and_unread() {
