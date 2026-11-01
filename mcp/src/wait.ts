@@ -22,20 +22,28 @@ const stdin = async (): Promise<Record<string, any>> => {
 const WAIT_MS = 10 * 60 * 1000;
 
 /** What to do after the hook ran: the exit code, and text for Claude when it is 2. */
-export async function main(hook: Record<string, any>, target: Target = {}): Promise<{ code: number; text?: string }> {
+export async function main(hook: Record<string, any>, target: Target = {}, retryMs = 2000): Promise<{ code: number; text?: string }> {
+  const register = () => typeof hook.session_id === "string" ? call({ op: "register", session: hook.session_id, cwd: hook.cwd }, target) : undefined;
   try {
-    if (typeof hook.session_id === "string") await call({ op: "register", session: hook.session_id, cwd: hook.cwd }, target);
-    for (;;) {
+    await register();
+  } catch (e) {
+    if (e instanceof AgentError && (e.code === "agent_down" || e.code === "closed")) return { code: 0 };
+    throw e;
+  }
+  for (;;) {
+    try {
       const r = await call({ op: "wait", exclusive: true, timeout_ms: WAIT_MS }, { ...target, timeoutMs: WAIT_MS + 5000 });
       if (r.superseded) return { code: 0 };
       const messages = r.messages as Array<Record<string, any>>;
       if (!messages.length) continue;
       await call({ op: "commit", ids: messages.map((m) => m.id) }, target);
       return { code: 2, text: render(messages) };
+    } catch (e) {
+      // the agent restarted under us (upgrade, launchd): wait for it instead of leaving the session deaf
+      if (!(e instanceof AgentError && (e.code === "agent_down" || e.code === "closed"))) throw e;
+      await new Promise((r) => setTimeout(r, retryMs));
+      await register()?.catch(() => {});
     }
-  } catch (e) {
-    if (e instanceof AgentError && (e.code === "agent_down" || e.code === "closed")) return { code: 0 };
-    throw e;
   }
 }
 

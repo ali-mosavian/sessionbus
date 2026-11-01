@@ -129,6 +129,26 @@ test("the wake hook registers the session, waits, hands over the message and mar
   await Promise.all([a.close(), b.close()]);
 });
 
+/** Restarting the agent (an upgrade, launchd) dropped every idle waiter's connection; the hook exited quietly and those sessions were never woken again. */
+test("the wake hook survives an agent restart and still wakes the session", async () => {
+  const [a, b] = [mcp("s-j"), mcp("s-k")];
+  await a.tool("ListAgents", { project: "t", as: "jane" });
+  await b.tool("ListAgents", { project: "t", as: "kyle" });
+  const waiting = waitHook({ session_id: "s-k" }, { sock: agent.sock, session: "s-k" });
+  await new Promise((r) => setTimeout(r, 100));
+  agent.stop();
+  await new Promise((r) => setTimeout(r, 300));
+  await agent.restart();
+  await a.tool("SendMessage", { project: "t", to: "kyle", message: "after restart" });
+  const { code, text } = await Promise.race([
+    waiting,
+    new Promise<{ code: number; text?: string }>((r) => setTimeout(() => r({ code: -1, text: "hook gave up" }), 8000)),
+  ]);
+  assert.equal(code, 2, text);
+  assert.match(text!, /after restart/);
+  await Promise.all([a.close(), b.close()]);
+});
+
 test("the wake hook exits quietly when no agent runs", async () => {
   const r = await waitHook({ session_id: "s-i" }, { sock: "/tmp/sb-nonexistent.sock" });
   assert.deepEqual(r, { code: 0 });
