@@ -10,6 +10,9 @@ type Settings = { hooks?: Record<string, Array<{ matcher?: string; hooks: Array<
 /** Events that arm the waiter: the start of a session, and the end of every turn (the wake itself ends in one). */
 const EVENTS = ["SessionStart", "Stop"] as const;
 
+/** Claude Code kills a hook after 600 s unless told otherwise; the waiter must live while the session idles. */
+const WAIT_FOREVER_S = 7 * 86400;
+
 /** The command a hook runs: this node, this package's waiter. */
 export const waitCommand = (): string => {
   const ts = import.meta.url.endsWith(".ts");
@@ -24,7 +27,7 @@ export function withHooks(settings: Settings, command = waitCommand()): Settings
   const hooks = { ...(settings.hooks ?? {}) };
   for (const event of EVENTS) {
     const groups = (hooks[event] ?? []).map((g) => ({ ...g, hooks: g.hooks.filter((h) => !isOurs(h)) })).filter((g) => g.hooks.length);
-    groups.push({ hooks: [{ type: "command", command, async: true, asyncRewake: true }] });
+    groups.push({ hooks: [{ type: "command", command, async: true, asyncRewake: true, timeout: WAIT_FOREVER_S }] });
     hooks[event] = groups;
   }
   return { ...settings, hooks };

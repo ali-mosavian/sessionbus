@@ -16,6 +16,15 @@ test("the waiter is armed at session start and after every turn, asynchronously 
   }
 });
 
+/** The hook default is 600 s: waiters died after 10 minutes and sessions idle longer were never woken again. */
+test("the waiter outlives Claude Code's 10-minute default hook timeout", () => {
+  const s = withHooks({}, '"node" "/x/dist/wait.js"');
+  for (const event of ["SessionStart", "Stop"]) {
+    const [h] = ours(s, event);
+    assert.ok(h.timeout >= 86400, `${event}: timeout ${h.timeout} kills the waiter while the session is idle`);
+  }
+});
+
 test("installing twice, or from a moved package, leaves one waiter per event and keeps other hooks", () => {
   const other = { hooks: [{ type: "command", command: "echo mine" }] };
   const once = withHooks({ model: "x", hooks: { Stop: [other] } }, '"node" "/old/dist/wait.js"');
