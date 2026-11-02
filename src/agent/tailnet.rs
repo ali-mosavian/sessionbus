@@ -55,16 +55,64 @@ pub fn parse(json: &str) -> Res<Status> {
     Ok(Status { me, peers })
 }
 
+/// How long a `tailscale` subprocess may take: the macOS app binary can hang, and the agent must still start.
+const CLI_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Runs `cli args` as the Tailscale CLI, killing it after `limit`. The macOS app's binary is a GUI
+/// unless told to act as the CLI (launchd starts us without a terminal), and then it may never exit.
+fn run(
+    cli: &str,
+    args: &[&str],
+    limit: Duration,
+) -> Res<std::process::Output> {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(cli)
+        .env("TAILSCALE_BE_CLI", "1")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let (out, err) = (child.stdout.take(), child.stderr.take());
+    fn read<R: std::io::Read + Send + 'static>(r: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut v = Vec::new();
+            if let Some(mut r) = r {
+                let _ = r.read_to_end(&mut v);
+            }
+            v
+        })
+    }
+    let (out, err) = (read(out), read(err));
+    let start = std::time::Instant::now();
+    let status = loop {
+        if let Some(s) = child.try_wait()? {
+            break s;
+        }
+        if start.elapsed() > limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(BusErr::new("tailscale", format!("`{cli} {}` did not finish in {}s", args.join(" "), limit.as_secs())));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    Ok(std::process::Output { status, stdout: out.join().unwrap_or_default(), stderr: err.join().unwrap_or_default() })
+}
+
 pub fn find_cli() -> Option<String> {
-    ["tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale", "/usr/bin/tailscale", "/usr/local/bin/tailscale"]
-        .into_iter()
-        .find(|c| std::process::Command::new(c).arg("version").output().is_ok_and(|o| o.status.success()))
-        .map(String::from)
+    find_in(&["tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale", "/usr/bin/tailscale", "/usr/local/bin/tailscale"], CLI_TIMEOUT)
+}
+
+/// The first of `candidates` that answers `version` within `limit`.
+pub fn find_in(
+    candidates: &[&str],
+    limit: Duration,
+) -> Option<String> {
+    candidates.iter().find(|c| run(c, &["version"], limit).is_ok_and(|o| o.status.success())).map(|c| c.to_string())
 }
 
 pub fn status(cli: &str) -> Res<Status> {
-    // the macOS app's binary is a GUI unless told to act as the CLI (launchd starts us without a terminal)
-    let out = std::process::Command::new(cli).env("TAILSCALE_BE_CLI", "1").args(["status", "--json"]).output()?;
+    let out = run(cli, &["status", "--json"], CLI_TIMEOUT)?;
     if !out.status.success() {
         return Err(BusErr::new("tailscale", String::from_utf8_lossy(&out.stderr).trim().to_string()));
     }

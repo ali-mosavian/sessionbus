@@ -570,6 +570,26 @@ async fn list_gives_last_seen_for_sessions_on_other_hosts() {
     .await;
 }
 
+/// After the account switch the macOS Tailscale binary hung on `version`; the agent blocked in
+/// startup forever, never created its socket, and every message tool timed out.
+#[test]
+fn a_hanging_tailscale_binary_does_not_block_discovery() {
+    use std::{os::unix::fs::PermissionsExt, time::{Duration, Instant}};
+    let d = dir();
+    std::fs::create_dir_all(&d).unwrap();
+    let hang = d.join("hang");
+    let good = d.join("good");
+    std::fs::write(&hang, "#!/bin/sh\nsleep 60\n").unwrap();
+    std::fs::write(&good, "#!/bin/sh\n[ \"$TAILSCALE_BE_CLI\" = 1 ] || sleep 60\n").unwrap();
+    for f in [&hang, &good] {
+        std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let t = Instant::now();
+    let found = sessionbus::agent::tailnet::find_in(&[hang.to_str().unwrap(), good.to_str().unwrap()], Duration::from_millis(300));
+    assert_eq!(found.as_deref(), good.to_str());
+    assert!(t.elapsed() < Duration::from_secs(5), "took {:?}", t.elapsed());
+}
+
 /// Under launchd the macOS Tailscale binary printed a GUI error instead of JSON, and the agent
 /// died with "expected value at line 1 column 1", which names nothing.
 #[test]
