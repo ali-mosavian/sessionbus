@@ -236,7 +236,7 @@ fn send(
         targets.retain(|t| t.1 != session);
     }
     let opt = |k: &str| req[k].as_str().map(String::from);
-    let mut sent = vec![];
+    let mut envs = vec![];
     for (host, sess, alias) in targets {
         let env = store::Envelope {
             id: uuid7(),
@@ -254,26 +254,33 @@ fn send(
             ttl_s: ttl,
         };
         let local = host == agent.cfg.host;
-        let mut row = store::Sent {
+        let row = store::Sent {
             id: env.id.clone(),
             project: project.into(),
             to_session: sess,
-            to_alias: alias.clone(),
-            to_host: host.clone(),
+            to_alias: alias,
+            to_host: host,
             state: if local { "delivered" } else { "queued" }.into(),
         };
-        if local {
-            store::queue_sent(&mut agent.db(), &row, session, None)?;
-            store::deliver(&agent.db(), &env)?;
-            agent.wake_inbox();
-        } else {
-            let payload = serde_json::to_string(&env)?;
-            store::queue_sent(&mut agent.db(), &row, session, Some(("msg", &payload, now() + ttl)))?;
-            agent.kick.notify_one();
-        }
-        row.to_alias = alias;
-        sent.push(json!(row));
+        let payload = if local { String::new() } else { serde_json::to_string(&env)? };
+        envs.push((env, row, local, payload));
     }
+    let expires = now() + ttl;
+    let items: Vec<(store::Sent, store::Route)> = envs
+        .iter()
+        .map(|(env, row, local, payload)| {
+            let route = if *local { store::Route::Local(env) } else { store::Route::Remote { payload, expires } };
+            (row.clone(), route)
+        })
+        .collect();
+    store::record_sends(&mut agent.db(), session, &items)?;
+    if envs.iter().any(|e| e.2) {
+        agent.wake_inbox();
+    }
+    if envs.iter().any(|e| !e.2) {
+        agent.kick.notify_one();
+    }
+    let sent: Vec<Value> = envs.iter().map(|e| json!(e.1)).collect();
     Ok(json!({"sent": sent}))
 }
 

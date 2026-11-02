@@ -470,7 +470,7 @@ fn read_receipt_overrides_expired() {
     use sessionbus::agent::store;
     let mut c = store::open(&dir_file()).unwrap();
     let s = store::Sent { id: "m1".into(), project: "p".into(), to_session: "b".into(), to_alias: "bob".into(), to_host: "B".into(), state: "queued".into() };
-    store::queue_sent(&mut c, &s, "a", Some(("msg", "{}", sessionbus::db::now() - 1))).unwrap();
+    store::record_sends(&mut c, "a", &[(s, store::Route::Remote { payload: "{}", expires: sessionbus::db::now() - 1 })]).unwrap();
     store::expire(&c).unwrap();
     assert_eq!(store::sent_status(&c, "a", &["m1".into()]).unwrap()[0].state, "expired");
     store::set_sent_state(&c, "m1", "read").unwrap();

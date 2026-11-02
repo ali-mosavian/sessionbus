@@ -256,23 +256,39 @@ pub fn local_subs(c: &Connection) -> Res<Vec<(String, String, String)>> {
 
 // --- outbox and sent --------------------------------------------------------
 
-pub fn queue_sent(
+/// How one recipient of a send is reached.
+pub enum Route<'a> {
+    /// A session on this host: the message goes straight into its inbox.
+    Local(&'a Envelope),
+    /// A session on another host: `payload` waits in the outbox until `expires`.
+    Remote { payload: &'a str, expires: i64 },
+}
+
+/// Records every recipient of one send in a single transaction. A broadcast costs one
+/// fsync, not one per recipient: per-recipient commits took over 15 s on a loaded disk.
+pub fn record_sends(
     c: &mut Connection,
-    sent: &Sent,
     from_session: &str,
-    wire: Option<(&str, &str, i64)>,
+    items: &[(Sent, Route)],
 ) -> Res<()> {
     let tx = c.transaction()?;
-    tx.execute(
-        "INSERT OR IGNORE INTO sent(id, project, from_session, to_session, to_alias, to_host, created, state)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![sent.id, sent.project, from_session, sent.to_session, sent.to_alias, sent.to_host, now(), sent.state],
-    )?;
-    if let Some((kind, payload, expires)) = wire {
+    for (sent, route) in items {
         tx.execute(
-            "INSERT OR IGNORE INTO outbox(id, kind, to_host, payload, expires) VALUES(?1, ?2, ?3, ?4, ?5)",
-            params![sent.id, kind, sent.to_host, payload, expires],
+            "INSERT OR IGNORE INTO sent(id, project, from_session, to_session, to_alias, to_host, created, state)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![sent.id, sent.project, from_session, sent.to_session, sent.to_alias, sent.to_host, now(), sent.state],
         )?;
+        match route {
+            Route::Local(env) => {
+                deliver(&tx, env)?;
+            }
+            Route::Remote { payload, expires } => {
+                tx.execute(
+                    "INSERT OR IGNORE INTO outbox(id, kind, to_host, payload, expires) VALUES(?1, 'msg', ?2, ?3, ?4)",
+                    params![sent.id, sent.to_host, payload, expires],
+                )?;
+            }
+        }
     }
     tx.commit()?;
     Ok(())
@@ -518,4 +534,63 @@ pub fn directory(c: &Connection) -> Res<Vec<(String, Value)>> {
     let mut s = c.prepare("SELECT host, record FROM directory ORDER BY host")?;
     let rows: Vec<(String, String)> = s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
     Ok(rows.into_iter().filter_map(|(h, r)| Some((h, serde_json::from_str(&r).ok()?))).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    use std::sync::Arc;
+
+    use super::*;
+
+    /// A broadcast to 20 recipients committed 20+ times; on a loaded disk (fsync ~90 ms) the
+    /// agent then missed the client's 15 s deadline. It must be one commit.
+    #[test]
+    fn a_send_to_many_recipients_is_one_commit() {
+        let dir = std::env::temp_dir().join(format!("sb-store-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut c = open(&dir.join("t.db")).unwrap();
+        let commits = Arc::new(AtomicUsize::new(0));
+        let n = commits.clone();
+        c.commit_hook(Some(move || {
+            n.fetch_add(1, SeqCst);
+            false
+        }));
+        let envs: Vec<Envelope> = (0..20)
+            .map(|i| Envelope {
+                id: format!("m{i}"),
+                project: "p".into(),
+                from_session: "a".into(),
+                from_alias: "a".into(),
+                from_host: "h".into(),
+                to_session: format!("s{i}"),
+                topic: None,
+                body: "x".into(),
+                reply_to: None,
+                status: None,
+                priority: None,
+                summary: None,
+                ttl_s: 60,
+            })
+            .collect();
+        let items: Vec<(Sent, Route)> = envs
+            .iter()
+            .map(|e| {
+                let sent = Sent {
+                    id: e.id.clone(),
+                    project: "p".into(),
+                    to_session: e.to_session.clone(),
+                    to_alias: "x".into(),
+                    to_host: "h".into(),
+                    state: "delivered".into(),
+                };
+                (sent, Route::Local(e))
+            })
+            .collect();
+        record_sends(&mut c, "a", &items).unwrap();
+        assert_eq!(commits.load(SeqCst), 1);
+        let got: i64 = c.query_row("SELECT count(*) FROM inbox", [], |r| r.get(0)).unwrap();
+        assert_eq!(got, 20);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
