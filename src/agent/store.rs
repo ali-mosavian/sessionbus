@@ -552,7 +552,7 @@ mod tests {
         let mut c = open(&dir.join("t.db")).unwrap();
         let commits = Arc::new(AtomicUsize::new(0));
         let n = commits.clone();
-        c.commit_hook(Some(move || {
+        let _ = c.commit_hook(Some(move || {
             n.fetch_add(1, SeqCst);
             false
         }));
