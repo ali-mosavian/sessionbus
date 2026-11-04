@@ -48,7 +48,7 @@ pub struct Sent {
 pub fn open(path: &Path) -> Res<Connection> {
     let c = Connection::open(path)?;
     c.execute_batch(
-        "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON; PRAGMA busy_timeout=5000;
+        "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA secure_delete=ON; PRAGMA busy_timeout=5000;
          CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, cwd TEXT, started INTEGER NOT NULL, last_seen INTEGER NOT NULL);
          CREATE TABLE IF NOT EXISTS pids(pid INTEGER PRIMARY KEY, started TEXT NOT NULL, session TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS aliases(project TEXT NOT NULL, alias TEXT NOT NULL, session TEXT NOT NULL,
@@ -542,6 +542,18 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+
+    /// With `synchronous=FULL` every commit fsynced the WAL; on tinytim's saturated disk that took a
+    /// median 0.4-0.6 s (max 3 s) and, behind the single db lock, pushed requests past the client's
+    /// 15 s deadline. WAL + NORMAL syncs only at checkpoints (commit ~0 ms) and stays consistent.
+    #[test]
+    fn commits_do_not_fsync_the_wal() {
+        let dir = std::env::temp_dir().join(format!("sb-sync-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let c = open(&dir.join("a.db")).unwrap();
+        let mode: i64 = c.query_row("PRAGMA synchronous", [], |r| r.get(0)).unwrap();
+        assert_eq!(mode, 1, "synchronous must be NORMAL (1), got {mode}");
+    }
 
     /// A broadcast to 20 recipients committed 20+ times; on a loaded disk (fsync ~90 ms) the
     /// agent then missed the client's 15 s deadline. It must be one commit.
